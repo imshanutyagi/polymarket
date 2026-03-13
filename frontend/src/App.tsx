@@ -70,6 +70,7 @@ function App() {
   const [strategies, setStrategies] = useState<StrategiesData>({
     strategy_a: false, strategy_b: false, strategy_c: false, strategy_c_trailing: false, strategy_d: false, strategy_e: false, strategy_f: false, strategy_7: false, strategy_cpt: false, strategy_claude: false, claude_confidence: 0, claude_phase: 1, claude_exit_reason: '', profit_target: 4.0, strikes: 0, b_done: false, live_mode: false, live_available: false
   });
+  const [strategyStats, setStrategyStats] = useState<Record<string, {trades:number;wins:number;total_profit:number;best:number;worst:number}>>({});
   const [ws, setWs] = useState<WebSocket | null>(null);
   const [liveSlugInputValue, setLiveSlugInputValue] = useState("");
   const [activeLiveSlug, setActiveLiveSlug] = useState("");
@@ -366,6 +367,7 @@ function App() {
             setMarket(msg.data.market);
             setPortfolio(msg.data.portfolio);
             setStrategies(msg.data.strategies);
+            if (msg.data.strategy_stats) setStrategyStats(msg.data.strategy_stats);
 
             if (msg.data.market?.is_live && msg.data.market?.live_slug) {
                 setActiveLiveSlug((prev) => prev === "" ? msg.data.market.live_slug : prev);
@@ -726,6 +728,65 @@ function App() {
               </table>
             </div>
           </div>
+          </div>
+
+          {/* Strategy Performance Tracker */}
+          <div className="bg-gray-900 border border-gray-800 rounded-3xl p-6 shadow-2xl">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-xl font-bold text-white">Strategy Performance</h2>
+              <button
+                onClick={() => ws?.send(JSON.stringify({ action: "RESET_STATS" }))}
+                className="text-xs text-gray-500 hover:text-gray-300 border border-gray-700 rounded-lg px-3 py-1 transition-colors"
+              >Reset Stats</button>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-sm">
+                <thead>
+                  <tr className="border-b border-gray-800 text-xs text-gray-500 uppercase tracking-wider">
+                    <th className="p-2">Strategy</th>
+                    <th className="p-2 text-center">Trades</th>
+                    <th className="p-2 text-center">Win %</th>
+                    <th className="p-2 text-right">Total P&L</th>
+                    <th className="p-2 text-right">Best</th>
+                    <th className="p-2 text-right">Worst</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(() => {
+                    const labels: Record<string,string> = {
+                      strategy_a: "Smart Balancer", strategy_b: "Momentum Sniper",
+                      strategy_c: "Fixed Target", strategy_c_trailing: "C+Trailing",
+                      strategy_d: "Strategy D", strategy_e: "Strategy E",
+                      strategy_f: "Strategy F", strategy_7: "Strategy 7",
+                      strategy_cpt: "CPT", strategy_claude: "Claude AI"
+                    };
+                    const rows = Object.entries(strategyStats).filter(([,s]) => s.trades > 0);
+                    if (rows.length === 0) return (
+                      <tr><td colSpan={6} className="text-center p-6 text-gray-600">No trades recorded yet.</td></tr>
+                    );
+                    return rows.map(([key, s]) => {
+                      const winPct = s.trades > 0 ? Math.round((s.wins / s.trades) * 100) : 0;
+                      return (
+                        <tr key={key} className="border-b border-gray-800/50 hover:bg-gray-800/20 transition-colors">
+                          <td className="p-2 font-semibold text-white">{labels[key] ?? key}</td>
+                          <td className="p-2 text-center text-gray-400">{s.trades}</td>
+                          <td className="p-2 text-center">
+                            <span className={winPct >= 60 ? 'text-emerald-400 font-bold' : winPct >= 40 ? 'text-yellow-400' : 'text-rose-400'}>{winPct}%</span>
+                          </td>
+                          <td className={`p-2 text-right font-bold ${s.total_profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {s.total_profit >= 0 ? '+' : ''}${s.total_profit.toFixed(2)}
+                          </td>
+                          <td className="p-2 text-right text-emerald-400">+${s.best.toFixed(2)}</td>
+                          <td className={`p-2 text-right ${s.worst < 0 ? 'text-rose-400' : 'text-gray-400'}`}>${s.worst.toFixed(2)}</td>
+                        </tr>
+                      );
+                    });
+                  })()}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
         </div>
 
         {/* Right Column - Trading & Automation */}

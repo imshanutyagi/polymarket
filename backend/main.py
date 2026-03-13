@@ -275,6 +275,21 @@ active_strategy_cpt = False  # Strategy C+ Trail
 active_strategy_claude = False  # Claude AI Confluence Strategy
 cpt_entry_time = 0.0  # Timestamp when C+ Trail position was opened
 global_profit_target = 4.0
+
+# Per-strategy performance stats (persist across cycles, reset manually)
+_stat_keys = ["strategy_a","strategy_b","strategy_c","strategy_c_trailing",
+               "strategy_d","strategy_e","strategy_f","strategy_7","strategy_cpt","strategy_claude"]
+strategy_stats = {k: {"trades":0,"wins":0,"total_profit":0.0,"best":0.0,"worst":0.0} for k in _stat_keys}
+
+def record_stat(strategy_key: str, profit: float):
+    if strategy_key in strategy_stats:
+        s = strategy_stats[strategy_key]
+        s["trades"] += 1
+        if profit > 0:
+            s["wins"] += 1
+        s["total_profit"] = round(s["total_profit"] + profit, 2)
+        s["best"]  = round(max(s["best"],  profit), 2)
+        s["worst"] = round(min(s["worst"], profit), 2)
 strategy_a_strikes = 0
 strategy_a_done = False
 strategy_b_trade_done = False
@@ -422,7 +437,8 @@ async def broadcast_state():
                 "b_done": strategy_b_trade_done,
                 "live_mode": live_mode_enabled,
                 "live_available": LIVE_TRADING_AVAILABLE
-            }
+            },
+            "strategy_stats": strategy_stats
         }
     }
     msg_str = json.dumps(state_msg)
@@ -527,6 +543,8 @@ async def market_loop():
                     # (No panic sell — let stop-loss handle the downside)
 
                     if did_exit:
+                        _active_key = "strategy_claude" if active_strategy_claude else ("strategy_cpt" if active_strategy_cpt else "strategy_c_trailing")
+                        record_stat(_active_key, live_profit)
                         portfolio.cash_out(market.up_price, market.down_price)
                         market.peak_profit = 0.0
                         strategy_a_strikes = 0
@@ -540,6 +558,8 @@ async def market_loop():
                 else:
                     # Original logic: Book profit at exactly $1.00 immediately for all other strategies
                     if live_profit >= 1.0:
+                        _active_key = "strategy_a" if active_strategy_a else ("strategy_b" if active_strategy_b else ("strategy_c" if active_strategy_c else "strategy_d"))
+                        record_stat(_active_key, live_profit)
                         portfolio.cash_out(market.up_price, market.down_price)
                         market.peak_profit = 0.0
                         strategy_a_strikes = 0
@@ -953,6 +973,7 @@ async def market_loop():
                     # High-profit positions are managed by the trailing stop — don't cut them on a timer.
                     if claude_strategy.position_entry_time > 0 and (now - claude_strategy.position_entry_time) >= 600 and 0.10 <= claude_live_pnl < 0.80:
                         print(f"[CLAUDE] GLOBAL TIMEOUT: +${claude_live_pnl:.2f} after 10min, cashing out")
+                        record_stat("strategy_claude", claude_live_pnl)
                         portfolio.cash_out(market.up_price, market.down_price)
                         market.peak_profit = 0.0
                         claude_strategy.reset_state()
@@ -960,6 +981,7 @@ async def market_loop():
                     # $2 Stop-Loss (after first 20 minutes of cycle)
                     elif time_left <= 2400 and claude_live_pnl <= -2.0:
                         print(f"[CLAUDE] GLOBAL STOPLOSS: ${claude_live_pnl:.2f}, cutting loss")
+                        record_stat("strategy_claude", claude_live_pnl)
                         portfolio.cash_out(market.up_price, market.down_price)
                         market.peak_profit = 0.0
                         claude_strategy.reset_state()
@@ -1213,7 +1235,7 @@ async def websocket_endpoint(websocket: WebSocket):
             cmd = json.loads(data)
             action = cmd.get("action")
             
-            global portfolio, active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing, active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7, active_strategy_cpt, active_strategy_claude, strategy_a_strikes, global_profit_target, live_mode_enabled, live_token_ids
+            global portfolio, active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing, active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7, active_strategy_cpt, active_strategy_claude, strategy_a_strikes, global_profit_target, live_mode_enabled, live_token_ids, strategy_stats
             current_portfolio = live_portfolio if live_mode_enabled else paper_portfolio
             portfolio = current_portfolio
             if action == "BUY_UP":
@@ -1356,6 +1378,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 with open("tokens.json", "w") as f:
                     json.dump([live_token_ids["up"], live_token_ids["down"]], f)
                 print(f"[LIVE] Token IDs updated: UP={up_token[:20]}... DOWN={down_token[:20]}...")
+            elif action == "RESET_STATS":
+                strategy_stats = {k: {"trades":0,"wins":0,"total_profit":0.0,"best":0.0,"worst":0.0} for k in _stat_keys}
             elif action == "CLEAR_STRATEGIES":
                 active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = active_strategy_cpt = active_strategy_claude = False
                 
