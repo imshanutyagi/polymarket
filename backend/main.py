@@ -109,6 +109,7 @@ class MarketState:
         self.history = [] # For strategy B momentum sniper (price, timestamp)
         self.is_live = False
         self.live_slug = ""
+        self.prices_loaded = False  # True only after first real CLOB price update
         
     def reset_cycle(self, price: float):
         self.price_to_beat = price
@@ -511,8 +512,8 @@ async def market_loop():
                             strategy_a_done = True
                         continue # Skip remainder of loop
 
-            # Block all trading during warmup period
-            if time.time() < cycle_warmup_until:
+            # Block all trading during warmup period OR until live prices are confirmed loaded
+            if time.time() < cycle_warmup_until or (market.is_live and not market.prices_loaded):
                 await asyncio.sleep(1)
                 continue
 
@@ -998,6 +999,7 @@ async def auto_discover_market():
                                     market.live_slug = slug
                                     market.up_price = max(1, min(99, up_price))
                                     market.down_price = max(1, min(99, down_price))
+                                    market.prices_loaded = True
                                     market.cycle_duration = time_remaining
                                     market.cycle_end_time = time.time() + time_remaining
                                     market.history = []  # Clear old chart data
@@ -1046,8 +1048,10 @@ async def _poll_live_prices():
 
         if up_price_raw and up_price_raw.get("price"):
             market.up_price = max(1, min(99, round(float(up_price_raw["price"]) * 100)))
+            market.prices_loaded = True
         if down_price_raw and down_price_raw.get("price"):
             market.down_price = max(1, min(99, round(float(down_price_raw["price"]) * 100)))
+            market.prices_loaded = True
 
         # Derive current_price from Polymarket token prices (up_price as probability)
         market.current_price = market.up_price
@@ -1124,6 +1128,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 if slug:
                     market.is_live = True
                     market.live_slug = slug
+                    market.prices_loaded = False  # Wait for real prices before trading
                     paper_portfolio.cash_out(market.up_price, market.down_price)
                     live_portfolio.cash_out(market.up_price, market.down_price)
             elif action == "SYNC_LIVE_GAMMA":
