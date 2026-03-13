@@ -695,6 +695,10 @@ class ClaudeStrategy:
             else:
                 max_dollars = 10.0
 
+            # Last 15 min: cap spend at $5 regardless of confidence (protect capital late cycle)
+            if time_remaining < 900:
+                max_dollars = min(max_dollars, 5.0)
+
             price_per_share = favored_price / 100.0
             shares = round(max_dollars / price_per_share, 1)
 
