@@ -71,6 +71,8 @@ function App() {
     strategy_a: false, strategy_b: false, strategy_c: false, strategy_c_trailing: false, strategy_d: false, strategy_e: false, strategy_f: false, strategy_7: false, strategy_cpt: false, strategy_claude: false, claude_confidence: 0, claude_phase: 1, claude_exit_reason: '', profit_target: 4.0, strikes: 0, b_done: false, live_mode: false, live_available: false
   });
   const [strategyStats, setStrategyStats] = useState<Record<string, {trades:number;wins:number;total_profit:number;best:number;worst:number}>>({});
+  const [backtestResults, setBacktestResults] = useState<{cycles:number;start_balance:number;results:Array<{key:string;label:string;final_balance:number;net_profit:number;roi_pct:number;trades:number;win_pct:number}>} | null>(null);
+  const [backtestLoading, setBacktestLoading] = useState(false);
   const [ws, setWs] = useState<WebSocket | null>(null);
   const [liveSlugInputValue, setLiveSlugInputValue] = useState("");
   const [activeLiveSlug, setActiveLiveSlug] = useState("");
@@ -695,7 +697,7 @@ function App() {
           {/* User History Panel */}
           <div className="bg-gray-900 border border-gray-800 p-6 rounded-2xl shadow-lg">
             <h2 className="text-xl font-bold mb-4 text-white flex items-center">
-              Settled Cycles History (Last 10)
+              Settled Cycles History (Last 50)
             </h2>
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
@@ -746,12 +748,14 @@ function App() {
                     <th className="p-2 text-center">Trades</th>
                     <th className="p-2 text-center">Win %</th>
                     <th className="p-2 text-right">Total P&L</th>
+                    <th className="p-2 text-right">~$10k Result</th>
                     <th className="p-2 text-right">Best</th>
                     <th className="p-2 text-right">Worst</th>
                   </tr>
                 </thead>
                 <tbody>
                   {(() => {
+                    const STAT_KEYS = ["strategy_a","strategy_b","strategy_c","strategy_c_trailing","strategy_d","strategy_e","strategy_f","strategy_7","strategy_cpt","strategy_claude"];
                     const labels: Record<string,string> = {
                       strategy_a: "Smart Balancer", strategy_b: "Momentum Sniper",
                       strategy_c: "Fixed Target", strategy_c_trailing: "C+Trailing",
@@ -759,24 +763,28 @@ function App() {
                       strategy_f: "Strategy F", strategy_7: "Strategy 7",
                       strategy_cpt: "CPT", strategy_claude: "Claude AI"
                     };
-                    const rows = Object.entries(strategyStats).filter(([,s]) => s.trades > 0);
-                    if (rows.length === 0) return (
-                      <tr><td colSpan={6} className="text-center p-6 text-gray-600">No trades recorded yet.</td></tr>
-                    );
-                    return rows.map(([key, s]) => {
+                    return STAT_KEYS.map(key => {
+                      const s = strategyStats[key] ?? {trades:0,wins:0,total_profit:0,best:0,worst:0};
                       const winPct = s.trades > 0 ? Math.round((s.wins / s.trades) * 100) : 0;
+                      const projected = 10000 + s.total_profit;
                       return (
                         <tr key={key} className="border-b border-gray-800/50 hover:bg-gray-800/20 transition-colors">
                           <td className="p-2 font-semibold text-white">{labels[key] ?? key}</td>
                           <td className="p-2 text-center text-gray-400">{s.trades}</td>
                           <td className="p-2 text-center">
-                            <span className={winPct >= 60 ? 'text-emerald-400 font-bold' : winPct >= 40 ? 'text-yellow-400' : 'text-rose-400'}>{winPct}%</span>
+                            {s.trades === 0
+                              ? <span className="text-gray-600">—</span>
+                              : <span className={winPct >= 60 ? 'text-emerald-400 font-bold' : winPct >= 40 ? 'text-yellow-400' : 'text-rose-400'}>{winPct}%</span>
+                            }
                           </td>
-                          <td className={`p-2 text-right font-bold ${s.total_profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                            {s.total_profit >= 0 ? '+' : ''}${s.total_profit.toFixed(2)}
+                          <td className={`p-2 text-right font-bold ${s.total_profit > 0 ? 'text-emerald-400' : s.total_profit < 0 ? 'text-rose-400' : 'text-gray-500'}`}>
+                            {s.trades === 0 ? '—' : `${s.total_profit >= 0 ? '+' : ''}$${s.total_profit.toFixed(2)}`}
                           </td>
-                          <td className="p-2 text-right text-emerald-400">+${s.best.toFixed(2)}</td>
-                          <td className={`p-2 text-right ${s.worst < 0 ? 'text-rose-400' : 'text-gray-400'}`}>${s.worst.toFixed(2)}</td>
+                          <td className={`p-2 text-right font-bold ${projected > 10000 ? 'text-emerald-400' : projected < 10000 ? 'text-rose-400' : 'text-gray-500'}`}>
+                            {s.trades === 0 ? <span className="text-gray-600">$10,000</span> : `$${projected.toFixed(2)}`}
+                          </td>
+                          <td className="p-2 text-right text-emerald-400">{s.trades === 0 ? '—' : `+$${s.best.toFixed(2)}`}</td>
+                          <td className={`p-2 text-right ${s.worst < 0 ? 'text-rose-400' : 'text-gray-400'}`}>{s.trades === 0 ? '—' : `$${s.worst.toFixed(2)}`}</td>
                         </tr>
                       );
                     });
@@ -784,6 +792,91 @@ function App() {
                 </tbody>
               </table>
             </div>
+          </div>
+
+          {/* Paper Backtest Panel */}
+          <div className="bg-gray-900 border border-gray-800 rounded-3xl p-6 shadow-2xl">
+            <div className="flex justify-between items-center mb-2">
+              <div>
+                <h2 className="text-xl font-bold text-white">Paper Backtest</h2>
+                <p className="text-xs text-gray-500 mt-0.5">Simulate all strategies from $10,000 across 10 random market cycles (paper only)</p>
+              </div>
+              <div className="flex gap-2">
+                {backtestResults && (
+                  <button
+                    onClick={() => setBacktestResults(null)}
+                    className="text-xs text-gray-500 hover:text-gray-300 border border-gray-700 rounded-lg px-3 py-1 transition-colors"
+                  >Reset</button>
+                )}
+                <button
+                  onClick={async () => {
+                    setBacktestLoading(true);
+                    try {
+                      const host = window.location.hostname;
+                      const res = await fetch(`http://${host}:8000/api/backtest`, {
+                        method: "POST",
+                        headers: {"Content-Type": "application/json"},
+                        body: JSON.stringify({ cycles: 10 })
+                      });
+                      const data = await res.json();
+                      setBacktestResults(data);
+                    } catch(e) { alert("Backtest failed: " + e); }
+                    finally { setBacktestLoading(false); }
+                  }}
+                  disabled={backtestLoading}
+                  className="text-xs bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white rounded-lg px-4 py-1.5 font-semibold transition-colors"
+                >{backtestLoading ? "Running..." : "Run Backtest"}</button>
+              </div>
+            </div>
+
+            {backtestResults && (
+              <div className="overflow-x-auto mt-4">
+                <p className="text-xs text-gray-500 mb-2">{backtestResults.cycles} simulated cycles · starting balance ${backtestResults.start_balance.toLocaleString()}</p>
+                <table className="w-full text-left border-collapse text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-800 text-xs text-gray-500 uppercase tracking-wider">
+                      <th className="p-2">Rank</th>
+                      <th className="p-2">Strategy</th>
+                      <th className="p-2 text-right">Final Balance</th>
+                      <th className="p-2 text-right">Net P&L</th>
+                      <th className="p-2 text-right">ROI %</th>
+                      <th className="p-2 text-center">Trades</th>
+                      <th className="p-2 text-center">Win %</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {backtestResults.results.map((r, i) => (
+                      <tr key={r.key} className={`border-b border-gray-800/50 hover:bg-gray-800/20 transition-colors ${i === 0 ? 'bg-yellow-900/10' : ''}`}>
+                        <td className="p-2 text-gray-500">
+                          {i === 0 ? <span className="text-yellow-400 font-bold">#1 🏆</span> : `#${i+1}`}
+                        </td>
+                        <td className="p-2 font-semibold text-white">{r.label}</td>
+                        <td className={`p-2 text-right font-bold ${r.final_balance >= 10000 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          ${r.final_balance.toLocaleString()}
+                        </td>
+                        <td className={`p-2 text-right ${r.net_profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {r.net_profit >= 0 ? '+' : ''}${r.net_profit.toFixed(2)}
+                        </td>
+                        <td className={`p-2 text-right font-bold ${r.roi_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {r.roi_pct >= 0 ? '+' : ''}{r.roi_pct}%
+                        </td>
+                        <td className="p-2 text-center text-gray-400">{r.trades}</td>
+                        <td className="p-2 text-center">
+                          <span className={r.win_pct >= 60 ? 'text-emerald-400 font-bold' : r.win_pct >= 40 ? 'text-yellow-400' : 'text-rose-400'}>{r.win_pct}%</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {!backtestResults && !backtestLoading && (
+              <div className="text-center py-8 text-gray-600 text-sm">Click "Run Backtest" to simulate all strategies on random market cycles</div>
+            )}
+            {backtestLoading && (
+              <div className="text-center py-8 text-blue-400 text-sm animate-pulse">Simulating 10 market cycles for all strategies...</div>
+            )}
           </div>
 
         </div>

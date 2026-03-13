@@ -104,6 +104,279 @@ async def proxy_gamma(slug: str):
         return []
 
 
+@app.post("/api/backtest")
+async def run_backtest_endpoint(body: dict = {}):
+    """Run a Monte Carlo paper-trade simulation for all strategies starting from $10,000."""
+    import random
+
+    cycles      = max(1, min(20, int(body.get("cycles", 10))))
+    vol         = float(body.get("volatility", 0.010))
+    TICK        = 5          # seconds per simulated tick
+    DUR         = 3600       # 1-hour cycle
+    START_BAL   = 10000.0
+
+    labels = {
+        "strategy_a": "Smart Balancer", "strategy_b": "Momentum Sniper",
+        "strategy_c": "Fixed Target",   "strategy_c_trailing": "C+Trailing",
+        "strategy_d": "Strategy D",     "strategy_e": "Strategy E",
+        "strategy_f": "Strategy F",     "strategy_7": "Strategy 7",
+        "strategy_cpt": "CPT",          "strategy_claude": "Claude AI",
+    }
+
+    # Accumulators across cycles
+    totals  = {k: 0.0 for k in labels}
+    t_count = {k: 0   for k in labels}
+    t_wins  = {k: 0   for k in labels}
+
+    for _ in range(cycles):
+        start_price = random.uniform(92, 108)
+
+        # Build tick sequence
+        ticks = []
+        price = start_price
+        history_sim: list = []   # (timestamp_sim, price)
+        for t in range(0, DUR + TICK, TICK):
+            price *= (1 + random.gauss(0, vol * math.sqrt(TICK / DUR)))
+            price  = max(50, min(150, price))
+            tl     = max(0, DUR - t)
+            tf     = max(0.001, tl / DUR)
+            z      = ((price - start_price) / start_price) / (vol * math.sqrt(tf))
+            raw_up = 0.5 * (1 + math.erf(z / math.sqrt(2)))
+            up_c   = max(1, min(99, round(raw_up * 100)))
+            dn_c   = 100 - up_c
+            up_p   = min(99, up_c + 1)
+            dn_p   = min(99, dn_c + 1)
+            history_sim.append((t, price))
+            ticks.append({"t": t, "tl": tl, "price": price, "up": up_p, "dn": dn_p})
+
+        up_wins = ticks[-1]["price"] > start_price
+
+        def new_port(bal): p = Portfolio(); p.balance = bal; return p
+
+        # ── Strategy A – Smart Balancer ──────────────────────────────────────
+        pA = new_port(START_BAL + totals["strategy_a"])
+        TARGET = 30.0
+        for tk in ticks:
+            up, dn, tl = tk["up"], tk["dn"], tk["tl"]
+            if tl <= 0: break
+            u = pA.positions["up"]; d = pA.positions["down"]
+            au = pA.spent["up"] / u if u > 0 else 0
+            if u < TARGET:
+                sh = TARGET - u
+                if u > 0:
+                    if dn <= 96 - au: pA.buy("up", sh, up)
+                elif up <= 15 or 85 <= up <= 90: pA.buy("up", sh, up)
+            if d < TARGET:
+                sh = TARGET - d
+                if u > 0:
+                    if dn <= 96 - au: pA.buy("down", sh, dn)
+                elif dn <= 15 or 85 <= dn <= 90: pA.buy("down", sh, dn)
+        pA.reset_for_cycle(up_wins, not up_wins)
+        profit = pA.balance - (START_BAL + totals["strategy_a"])
+        totals["strategy_a"] += profit; t_count["strategy_a"] += 1
+        if profit > 0: t_wins["strategy_a"] += 1
+
+        # ── Strategy B – Momentum Sniper ─────────────────────────────────────
+        pB = new_port(START_BAL + totals["strategy_b"])
+        b_done = False
+        for i, tk in enumerate(ticks):
+            up, dn, tl = tk["up"], tk["dn"], tk["tl"]
+            if tl <= 30: break
+            hist1m = [h for h in history_sim if h[0] >= tk["t"] - 60]
+            if not b_done and len(hist1m) > 10:
+                pct = (hist1m[-1][1] - hist1m[0][1]) / hist1m[0][1]
+                if pct >= 0.0002 and up < 80:
+                    if pB.buy("up", 15.0, up): b_done = True
+                elif pct <= -0.0002 and dn < 80:
+                    if pB.buy("down", 15.0, dn): b_done = True
+            elif b_done:
+                us = pB.spent["up"]; ds = pB.spent["down"]
+                if us > 0 and ds == 0:
+                    v = pB.positions["up"] * (up / 100); p2 = v - us
+                    if p2 >= 1.0 or (v / us) >= 1.30 or (v / us) <= 0.60:
+                        pB.cash_out(up, dn); b_done = False
+                elif ds > 0 and us == 0:
+                    v = pB.positions["down"] * (dn / 100); p2 = v - ds
+                    if p2 >= 1.0 or (v / ds) >= 1.30 or (v / ds) <= 0.60:
+                        pB.cash_out(up, dn); b_done = False
+        pB.reset_for_cycle(up_wins, not up_wins)
+        profit = pB.balance - (START_BAL + totals["strategy_b"])
+        totals["strategy_b"] += profit; t_count["strategy_b"] += 1
+        if profit > 0: t_wins["strategy_b"] += 1
+
+        # ── Strategy C – Fixed Target (both sides ≤45c) ──────────────────────
+        pC = new_port(START_BAL + totals["strategy_c"])
+        for tk in ticks:
+            up, dn, tl = tk["up"], tk["dn"], tk["tl"]
+            if tl <= 60: break
+            if pC.cycle_profit < 4.0:
+                u = pC.positions["up"]; d = pC.positions["down"]
+                if u < 30 and up <= 45: pC.buy("up",  30 - u, up)
+                if d < 30 and dn <= 45: pC.buy("down", 30 - d, dn)
+        pC.reset_for_cycle(up_wins, not up_wins)
+        profit = pC.balance - (START_BAL + totals["strategy_c"])
+        totals["strategy_c"] += profit; t_count["strategy_c"] += 1
+        if profit > 0: t_wins["strategy_c"] += 1
+
+        # ── Strategy 7 – Mean Reversion ──────────────────────────────────────
+        p7 = new_port(START_BAL + totals["strategy_7"])
+        for tk in ticks:
+            up, dn, tl = tk["up"], tk["dn"], tk["tl"]
+            if tl <= 10: break
+            if p7.cycle_profit < 4.0:
+                u = p7.positions["up"]; d = p7.positions["down"]
+                if up >= 65 and d == 0: p7.buy("down", 30.0, dn)
+                elif dn >= 65 and u == 0: p7.buy("up",  30.0, up)
+        p7.reset_for_cycle(up_wins, not up_wins)
+        profit = p7.balance - (START_BAL + totals["strategy_7"])
+        totals["strategy_7"] += profit; t_count["strategy_7"] += 1
+        if profit > 0: t_wins["strategy_7"] += 1
+
+        # ── Strategy D/E (HighFrequencyScalper) ──────────────────────────────
+        for key in ["strategy_d", "strategy_e"]:
+            pS = new_port(START_BAL + totals[key])
+            sc = HighFrequencyScalper()
+            for tk in ticks:
+                up, dn, tl = tk["up"], tk["dn"], tk["tl"]
+                acts = sc.on_tick(tl, up, dn, pS)
+                for act in acts:
+                    if act["action"] in ("market_sell", "limit_sell_fill"):
+                        rev = act["shares"] * (act["price"] / 100.0)
+                        pS.balance += rev
+                        pS.positions[act["side"]] -= act["shares"]
+            pS.reset_for_cycle(up_wins, not up_wins)
+            profit = pS.balance - (START_BAL + totals[key])
+            totals[key] += profit; t_count[key] += 1
+            if profit > 0: t_wins[key] += 1
+
+        # ── Strategy F (TrendScaler) ──────────────────────────────────────────
+        pF = new_port(START_BAL + totals["strategy_f"])
+        ts = TrendScaler()
+        for tk in ticks:
+            up, dn, tl = tk["up"], tk["dn"], tk["tl"]
+            acts = ts.on_tick(tl, up, dn, pF)
+            for act in acts:
+                if act["action"] in ("market_sell", "limit_sell_fill"):
+                    rev = act["shares"] * (act["price"] / 100.0)
+                    pF.balance += rev
+                    pF.positions[act["side"]] -= act["shares"]
+        pF.reset_for_cycle(up_wins, not up_wins)
+        profit = pF.balance - (START_BAL + totals["strategy_f"])
+        totals["strategy_f"] += profit; t_count["strategy_f"] += 1
+        if profit > 0: t_wins["strategy_f"] += 1
+
+        # ── C+Trailing (simplified directional scalp) ─────────────────────────
+        pCT = new_port(START_BAL + totals["strategy_c_trailing"])
+        ct_held = None
+        for i, tk in enumerate(ticks):
+            up, dn, tl = tk["up"], tk["dn"], tk["tl"]
+            if tl <= 60: break
+            hist1m = [h for h in history_sim if h[0] >= tk["t"] - 60]
+            micro = "neutral"
+            if len(hist1m) > 3:
+                chg = (hist1m[-1][1] - hist1m[0][1]) / hist1m[0][1]
+                if chg > 0.0002: micro = "up"
+                elif chg < -0.0002: micro = "down"
+            if ct_held is None and micro != "neutral" and pCT.cycle_profit < 4.0:
+                if micro == "up" and up <= 45:
+                    if pCT.buy("up", 30.0, up): ct_held = "up"
+                elif micro == "down" and dn <= 45:
+                    if pCT.buy("down", 30.0, dn): ct_held = "down"
+            elif ct_held:
+                u = pCT.positions["up"]; d = pCT.positions["down"]
+                val = (u * up + d * dn) / 100.0
+                pnl = val - pCT.total_spent
+                if pnl >= 1.0:
+                    pCT.cash_out(up, dn); ct_held = None
+                elif pnl <= -2.0 and tl <= 2400:
+                    pCT.cash_out(up, dn); ct_held = None
+        pCT.reset_for_cycle(up_wins, not up_wins)
+        profit = pCT.balance - (START_BAL + totals["strategy_c_trailing"])
+        totals["strategy_c_trailing"] += profit; t_count["strategy_c_trailing"] += 1
+        if profit > 0: t_wins["strategy_c_trailing"] += 1
+
+        # ── CPT (C+ Trail directional scalp & repeat) ────────────────────────
+        pCPT = new_port(START_BAL + totals["strategy_cpt"])
+        cpt_held = None
+        for tk in ticks:
+            up, dn, tl = tk["up"], tk["dn"], tk["tl"]
+            if tl <= 60: break
+            hist1m = [h for h in history_sim if h[0] >= tk["t"] - 60]
+            micro = "neutral"
+            if len(hist1m) > 3:
+                chg = (hist1m[-1][1] - hist1m[0][1]) / hist1m[0][1]
+                if chg > 0.0001: micro = "up"
+                elif chg < -0.0001: micro = "down"
+            if cpt_held is None and micro != "neutral" and pCPT.cycle_profit < 4.0:
+                if not (tl <= 900 and pCPT.cycle_profit < 4.0 and (up <= 20 or dn <= 20)):
+                    if micro == "up" and up <= 50:
+                        if pCPT.buy("up", 30.0, up): cpt_held = "up"
+                    elif micro == "down" and dn <= 50:
+                        if pCPT.buy("down", 30.0, dn): cpt_held = "down"
+            elif cpt_held:
+                val = (pCPT.positions["up"] * up + pCPT.positions["down"] * dn) / 100.0
+                pnl = val - pCPT.total_spent
+                if pnl >= 1.0:
+                    pCPT.cash_out(up, dn); cpt_held = None
+                elif pnl <= -2.0 and tl <= 2400:
+                    pCPT.cash_out(up, dn); cpt_held = None
+        pCPT.reset_for_cycle(up_wins, not up_wins)
+        profit = pCPT.balance - (START_BAL + totals["strategy_cpt"])
+        totals["strategy_cpt"] += profit; t_count["strategy_cpt"] += 1
+        if profit > 0: t_wins["strategy_cpt"] += 1
+
+        # ── Claude AI ──────────────────────────────────────────────────────────
+        pCL = new_port(START_BAL + totals["strategy_claude"])
+        cl  = ClaudeStrategy()
+        cl.reset_state(full_reset=True)
+        cl.cycle_start_time = 0.0  # start observation immediately
+        peak = 0.0
+        for tk in ticks:
+            up, dn, tl = tk["up"], tk["dn"], tk["tl"]
+            acts = cl.on_tick(tl, up, dn, pCL, history_sim, pCL.cycle_profit, 4.0)
+            for act in acts:
+                if act["action"] == "buy":
+                    pCL.buy(act["side"], act["shares"], act["price"])
+                elif act["action"] == "sell":
+                    rev = act["shares"] * (act["price"] / 100.0)
+                    pCL.balance += rev; pCL.positions[act["side"]] -= act["shares"]
+            # evaluate exit
+            uv = pCL.positions["up"] * (up / 100); dv = pCL.positions["down"] * (dn / 100)
+            pnl = (uv + dv) - pCL.total_spent
+            if pnl > peak: peak = pnl
+            time_left_exit = tl
+            dyn = 0.50 if time_left_exit <= 300 else (0.70 if time_left_exit <= 600 else 1.0)
+            did_exit = False
+            if pCL.total_spent > 0:
+                if dyn <= pnl <= 1.50: did_exit = True
+                elif peak > 1.50 and pnl <= peak - 0.15: did_exit = True
+                elif tl <= 2400 and pnl <= -2.0: did_exit = True
+            if did_exit:
+                pCL.cash_out(up, dn); peak = 0.0; cl.reset_state()
+        pCL.reset_for_cycle(up_wins, not up_wins)
+        profit = pCL.balance - (START_BAL + totals["strategy_claude"])
+        totals["strategy_claude"] += profit; t_count["strategy_claude"] += 1
+        if profit > 0: t_wins["strategy_claude"] += 1
+
+    # Build results
+    results = []
+    for key, label in labels.items():
+        final_bal = round(START_BAL + totals[key], 2)
+        net       = round(totals[key], 2)
+        tc        = t_count[key]
+        win_pct   = round((t_wins[key] / tc) * 100) if tc > 0 else 0
+        results.append({
+            "key": key, "label": label,
+            "final_balance": final_bal,
+            "net_profit":    net,
+            "roi_pct":       round((net / START_BAL) * 100, 1),
+            "trades":        tc,
+            "win_pct":       win_pct,
+        })
+    results.sort(key=lambda r: r["final_balance"], reverse=True)
+    return {"cycles": cycles, "start_balance": START_BAL, "results": results}
+
+
 class MarketState:
     def __init__(self):
         self.current_price = 0.0
@@ -212,9 +485,9 @@ class Portfolio:
                 'payout': round(payout, 2),
                 'profit': round(profit_for_trade, 2)
             })
-            # keep only last 10
-            if len(self.history) > 10:
-                self.history = self.history[-10:]
+            # keep only last 50
+            if len(self.history) > 50:
+                self.history = self.history[-50:]
 
         self.positions = {'up': 0.0, 'down': 0.0}
         self.spent = {'up': 0.0, 'down': 0.0}
@@ -239,8 +512,8 @@ class Portfolio:
                 'payout': round(total_value, 2),
                 'profit': round(profit, 2)
             })
-            if len(self.history) > 10:
-                self.history = self.history[-10:]
+            if len(self.history) > 50:
+                self.history = self.history[-50:]
 
         self.positions = {'up': 0.0, 'down': 0.0}
         self.spent = {'up': 0.0, 'down': 0.0}
