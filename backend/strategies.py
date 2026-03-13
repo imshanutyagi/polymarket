@@ -556,11 +556,11 @@ class ClaudeStrategy:
                 exit_reason = "phase4_exit"
 
             # --- ZONE 1: Time-adjusted instant sell ---
-            # Last 10 min: sell at $0.50+  |  Last 5 min: sell at $0.40+  |  Normal: $1.00–$1.50
+            # Last 5 min: $0.50+  |  Last 10 min: $0.70+  |  Normal: $1.00–$1.50
             if time_remaining <= 300:
-                zone1_min = 0.40
-            elif time_remaining <= 600:
                 zone1_min = 0.50
+            elif time_remaining <= 600:
+                zone1_min = 0.70
             else:
                 zone1_min = self.ZONE1_MIN  # $1.00
 
