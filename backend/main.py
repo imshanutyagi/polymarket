@@ -1153,30 +1153,22 @@ async def _poll_live_prices():
         if not up_token or not down_token:
             return
 
-        loop = asyncio.get_event_loop()
+        # Fetch prices directly from CLOB REST API (no auth needed, more reliable than py-clob-client reader)
+        async with httpx.AsyncClient(timeout=5.0) as hclient:
+            up_resp = await hclient.get(f"https://clob.polymarket.com/last-trade-price?token_id={up_token}")
+            dn_resp = await hclient.get(f"https://clob.polymarket.com/last-trade-price?token_id={down_token}")
 
-        # Use the official py-clob-client (read-only works without auth)
-        reader = clob_client if clob_client else None
-        if reader is None:
-            # Create a read-only client (no auth needed for prices)
-            try:
-                from py_clob_client.client import ClobClient as _Clob
-                reader = _Clob("https://clob.polymarket.com")
-            except Exception:
-                return
+        up_data = up_resp.json() if up_resp.status_code == 200 else {}
+        dn_data = dn_resp.json() if dn_resp.status_code == 200 else {}
 
-        # get_price(token_id, side) returns a float string like "0.55"
-        up_price_raw = await loop.run_in_executor(None, lambda: reader.get_last_trade_price(up_token))
-        down_price_raw = await loop.run_in_executor(None, lambda: reader.get_last_trade_price(down_token))
-
-        if up_price_raw and up_price_raw.get("price"):
-            up_val = max(1, min(99, round(float(up_price_raw["price"]) * 100)))
-            dn_val = max(1, min(99, round(float(down_price_raw["price"]) * 100))) if (down_price_raw and down_price_raw.get("price")) else market.down_price
+        if up_data.get("price"):
+            up_val = max(1, min(99, round(float(up_data["price"]) * 100)))
+            dn_val = max(1, min(99, round(float(dn_data["price"]) * 100))) if dn_data.get("price") else market.down_price
             # Reject stale settlement prices: 1¢/99¢ split = expired market
             is_stale = (up_val <= 2 and dn_val >= 97) or (up_val >= 97 and dn_val <= 2)
             if not is_stale:
                 market.up_price = up_val
-                if down_price_raw and down_price_raw.get("price"):
+                if dn_data.get("price"):
                     market.down_price = dn_val
                 market.prices_loaded = True
 
