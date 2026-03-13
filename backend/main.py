@@ -329,10 +329,12 @@ async def execute_live_buy(direction: str, shares: float, price_cents: int):
     if not token_id:
         print(f"[LIVE] ⚠️ No token ID for {direction} — order SKIPPED (simulation only)")
         return
-    price = round(price_cents / 100.0, 2)
-    order_args = OrderArgs(price=price, size=shares, side="BUY", token_id=token_id)
-    print(f"[LIVE] Placing BUY {shares} {direction.upper()} @ {price_cents}¢")
-    await _try_order(order_args, OrderType.FOK)
+    # Use aggressive price (+2¢) to act as taker and get immediate GTC fill
+    price = round(min(0.97, (price_cents + 2) / 100.0), 2)
+    size = round(shares, 2)
+    order_args = OrderArgs(price=price, size=size, side="BUY", token_id=token_id)
+    print(f"[LIVE] Placing BUY {size} {direction.upper()} @ {int(price*100)}¢")
+    await _try_order(order_args, OrderType.GTC)
 
 async def execute_live_sell(direction: str, shares: float, price_cents: int):
     """Execute a real market sell on Polymarket CLOB."""
@@ -342,10 +344,12 @@ async def execute_live_sell(direction: str, shares: float, price_cents: int):
     if not token_id:
         print(f"[LIVE] ⚠️ No token ID for {direction} — sell SKIPPED (simulation only)")
         return
-    price = round(price_cents / 100.0, 2)
-    order_args = OrderArgs(price=price, size=shares, side="SELL", token_id=token_id)
-    print(f"[LIVE] Placing SELL {shares} {direction.upper()} @ {price_cents}¢")
-    await _try_order(order_args, OrderType.FOK)
+    # Use aggressive price (-2¢) to act as taker and get immediate GTC fill
+    price = round(max(0.02, (price_cents - 2) / 100.0), 2)
+    size = round(shares, 2)
+    order_args = OrderArgs(price=price, size=size, side="SELL", token_id=token_id)
+    print(f"[LIVE] Placing SELL {size} {direction.upper()} @ {int(price*100)}¢")
+    await _try_order(order_args, OrderType.GTC)
 
 clients: List[WebSocket] = []
 
