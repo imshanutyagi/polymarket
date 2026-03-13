@@ -294,8 +294,8 @@ strategy_a_strikes = 0
 strategy_a_done = False
 strategy_b_trade_done = False
 live_mode_enabled = os.getenv("LIVE_TRADING_ENABLED", "FALSE").upper() == "TRUE"  # Auto-set from .env
-WARMUP_SECONDS = 240  # Wait 4 minutes before trading after start or new cycle
-cycle_warmup_until = time.time() + WARMUP_SECONDS  # Initial startup warmup
+WARMUP_SECONDS = 0  # Warmup removed — per-strategy guards handle this (prices_loaded, Claude 3min observation, stale filter)
+cycle_warmup_until = 0.0  # No warmup
 
 # Token IDs for the current live market (loaded from tokens.json or via CLOB lookup)
 live_token_ids = {"up": "", "down": ""}
@@ -503,10 +503,9 @@ async def market_loop():
                 scalper_5.reset_state()
                 scalper_6.reset_state()
                 claude_strategy.reset_state()
-                cycle_warmup_until = time.time() + WARMUP_SECONDS  # Reset warmup for new cycle
                 market.prices_loaded = False  # Force wait for fresh prices on new cycle
                 asyncio.create_task(cancel_all_open_orders())  # Cancel stale GTC/resting orders
-                print(f"[WARMUP] New cycle started. Trading paused for {WARMUP_SECONDS}s to allow price data to settle.")
+                print(f"[CYCLE] New cycle started. Per-strategy guards active (prices_loaded, Claude observation).")
                 
             # Update dynamic pricing
             market.update_pricing()
