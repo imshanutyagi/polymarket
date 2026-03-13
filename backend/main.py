@@ -390,13 +390,20 @@ async def sync_live_balance():
     while True:
         try:
             if clob_client and live_mode_enabled:
-                balance_data = clob_client.get_balance()
-                usdc = float(balance_data.get("balance", 0))
-                if usdc > 0:
-                    live_portfolio.balance = usdc
+                proxy_address = os.getenv("POLY_PROXY_ADDRESS", "")
+                if proxy_address:
+                    async with httpx.AsyncClient() as client:
+                        resp = await client.get(
+                            f"https://data-api.polymarket.com/portfolio?address={proxy_address}",
+                            timeout=10.0
+                        )
+                        data = resp.json()
+                        usdc = float(data.get("cash", data.get("balance", 0)))
+                        if usdc >= 0:
+                            live_portfolio.balance = usdc
         except Exception as e:
             print(f"[LIVE] Balance sync failed: {e}")
-        await asyncio.sleep(30)  # Sync every 30 seconds
+        await asyncio.sleep(30)
 
 async def market_loop():
     global active_strategy_a, active_strategy_b
