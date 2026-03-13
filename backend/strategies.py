@@ -555,15 +555,9 @@ class ClaudeStrategy:
                 should_exit = True
                 exit_reason = "phase4_exit"
 
-            # --- ZONE 3: Panic Fallback ---
-            # If profit peaked above $1.00 but crashed below it → panic sell instantly
-            elif self.profit_ever_hit_target and unrealized < self.PANIC_SELL_THRESHOLD:
-                should_exit = True
-                exit_reason = f"zone3_panic_sell (peaked ${self.peak_unrealized:.2f}, now ${unrealized:.2f})"
-
             # --- ZONE 1: $1.00–$1.50 — Instant Sell ---
             # Sell immediately when profit lands in this range (same as C+Trailing)
-            elif self.ZONE1_MIN <= unrealized <= self.ZONE1_MAX:
+            if self.ZONE1_MIN <= unrealized <= self.ZONE1_MAX:
                 should_exit = True
                 exit_reason = f"zone1_instant_sell (${unrealized:.2f})"
 

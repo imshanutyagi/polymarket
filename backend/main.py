@@ -523,9 +523,7 @@ async def market_loop():
                     # 2. Trailing sell: spiked > $1.50, exit when drops $0.15 from peak
                     elif market.peak_profit > 1.50 and live_profit <= (market.peak_profit - 0.15):
                         did_exit = True
-                    # 3. Panic sell: peaked above target but crashed back below it
-                    elif market.peak_profit >= dynamic_target and live_profit < dynamic_target:
-                        did_exit = True
+                    # (No panic sell — let stop-loss handle the downside)
 
                     if did_exit:
                         portfolio.cash_out(market.up_price, market.down_price)
