@@ -288,7 +288,7 @@ async def execute_live_buy(direction: str, shares: float, price_cents: int):
     try:
         token_id = live_token_ids.get(direction, "")
         if not token_id:
-            print(f"[LIVE] No token ID for {direction} — skipping live order")
+            print(f"[LIVE] ⚠️ No token ID for {direction} — order SKIPPED (simulation only)")
             return
         price = round(price_cents / 100.0, 2)
         order_args = OrderArgs(
@@ -297,11 +297,12 @@ async def execute_live_buy(direction: str, shares: float, price_cents: int):
             side="BUY",
             token_id=token_id
         )
-        signed_order = clob_client.create_order(order_args)
-        resp = clob_client.post_order(signed_order, OrderType.GTC)
-        print(f"[LIVE] BUY {shares} {direction.upper()} @ {price_cents}¢ → {resp}")
+        print(f"[LIVE] Placing BUY {shares} {direction.upper()} @ {price_cents}¢ (token={token_id[:16]}...)")
+        signed_order = await asyncio.to_thread(clob_client.create_order, order_args)
+        resp = await asyncio.to_thread(clob_client.post_order, signed_order, OrderType.FOK)
+        print(f"[LIVE] ✅ BUY {shares} {direction.upper()} @ {price_cents}¢ → {resp}")
     except Exception as e:
-        print(f"[LIVE] Buy order failed: {e}")
+        print(f"[LIVE] ❌ Buy order failed: {e}")
 
 async def execute_live_sell(direction: str, shares: float, price_cents: int):
     """Execute a real market sell on Polymarket CLOB."""
@@ -310,7 +311,7 @@ async def execute_live_sell(direction: str, shares: float, price_cents: int):
     try:
         token_id = live_token_ids.get(direction, "")
         if not token_id:
-            print(f"[LIVE] No token ID for {direction} — skipping live sell")
+            print(f"[LIVE] ⚠️ No token ID for {direction} — sell SKIPPED (simulation only)")
             return
         price = round(price_cents / 100.0, 2)
         order_args = OrderArgs(
@@ -319,11 +320,12 @@ async def execute_live_sell(direction: str, shares: float, price_cents: int):
             side="SELL",
             token_id=token_id
         )
-        signed_order = clob_client.create_order(order_args)
-        resp = clob_client.post_order(signed_order, OrderType.GTC)
-        print(f"[LIVE] SELL {shares} {direction.upper()} @ {price_cents}¢ → {resp}")
+        print(f"[LIVE] Placing SELL {shares} {direction.upper()} @ {price_cents}¢ (token={token_id[:16]}...)")
+        signed_order = await asyncio.to_thread(clob_client.create_order, order_args)
+        resp = await asyncio.to_thread(clob_client.post_order, signed_order, OrderType.FOK)
+        print(f"[LIVE] ✅ SELL {shares} {direction.upper()} @ {price_cents}¢ → {resp}")
     except Exception as e:
-        print(f"[LIVE] Sell order failed: {e}")
+        print(f"[LIVE] ❌ Sell order failed: {e}")
 
 clients: List[WebSocket] = []
 
@@ -524,8 +526,9 @@ async def market_loop():
                             strategy_a_done = True
                         continue # Skip remainder of loop
 
-            # Block all trading during warmup period OR until live prices are confirmed loaded
-            if time.time() < cycle_warmup_until or (market.is_live and not market.prices_loaded):
+            # Block all trading during warmup, until live prices loaded, or until token IDs ready in live mode
+            tokens_ready = not live_mode_enabled or (bool(live_token_ids.get("up")) and bool(live_token_ids.get("down")))
+            if time.time() < cycle_warmup_until or (market.is_live and not market.prices_loaded) or not tokens_ready:
                 await asyncio.sleep(1)
                 continue
 
