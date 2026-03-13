@@ -265,7 +265,7 @@ strategy_a_strikes = 0
 strategy_a_done = False
 strategy_b_trade_done = False
 live_mode_enabled = os.getenv("LIVE_TRADING_ENABLED", "FALSE").upper() == "TRUE"  # Auto-set from .env
-WARMUP_SECONDS = 120  # Wait 2 minutes before trading after start or new cycle
+WARMUP_SECONDS = 240  # Wait 4 minutes before trading after start or new cycle
 cycle_warmup_until = time.time() + WARMUP_SECONDS  # Initial startup warmup
 
 # Token IDs for the current live market (loaded from tokens.json or via CLOB lookup)
