@@ -23,6 +23,7 @@ load_dotenv(dotenv_path)
 
 LIVE_TRADING_AVAILABLE = False
 clob_client = None
+clob_clients = {}
 try:
     from py_clob_client.client import ClobClient
     from py_clob_client.clob_types import OrderArgs, OrderType, ApiCreds
@@ -35,18 +36,24 @@ try:
     private_key = os.getenv("POLY_PRIVATE_KEY", "")
 
     if private_key and proxy_address:
-        clob_client = ClobClient(
-            "https://clob.polymarket.com",
-            key=private_key,
-            chain_id=POLYGON,
-            signature_type=1,  # POLY_PROXY — standard Polymarket account
-            funder=proxy_address
-        )
-        # Derive correct CLOB API credentials from private key (ignores Builder keys)
-        creds = clob_client.create_or_derive_api_creds()
-        clob_client.set_api_creds(creds)
-        LIVE_TRADING_AVAILABLE = True
-        print(f"[LIVE] CLOB credentials derived successfully! key={creds.api_key[:8]}...")
+        # Build clients for each signature type — we'll try them in order when placing orders
+        clob_clients = {}
+        for sig_type, funder in [(0, None), (1, proxy_address), (2, proxy_address)]:
+            try:
+                kwargs = {"key": private_key, "chain_id": POLYGON, "signature_type": sig_type}
+                if funder:
+                    kwargs["funder"] = funder
+                c = ClobClient("https://clob.polymarket.com", **kwargs)
+                creds = c.create_or_derive_api_creds()
+                c.set_api_creds(creds)
+                clob_clients[sig_type] = c
+            except Exception:
+                pass
+        # Use type=0 (EOA) as default — works when private key IS the trading account
+        clob_client = clob_clients.get(0) or clob_clients.get(1) or clob_clients.get(2)
+        if clob_client:
+            LIVE_TRADING_AVAILABLE = True
+            print(f"[LIVE] CLOB credentials derived successfully! key={creds.api_key[:8]}...")
     else:
         print("[LIVE] POLY_PRIVATE_KEY or POLY_PROXY_ADDRESS not set — Live trading disabled.")
 except ImportError:
@@ -281,51 +288,52 @@ try:
 except:
     pass
 
+async def _try_order(order_args: "OrderArgs", order_type: "OrderType") -> tuple:
+    """Try placing an order with all available signature types. Returns (success, response)."""
+    for sig_type in [0, 1, 2]:
+        client = clob_clients.get(sig_type)
+        if not client:
+            continue
+        try:
+            signed = await asyncio.to_thread(client.create_order, order_args)
+            resp = await asyncio.to_thread(client.post_order, signed, order_type)
+            print(f"[LIVE] ✅ Order placed via sig_type={sig_type} → {resp}")
+            return True, resp
+        except Exception as e:
+            err = str(e)
+            if "invalid signature" in err or "Unauthorized" in err:
+                print(f"[LIVE] sig_type={sig_type} failed: {err[:80]}")
+                continue
+            else:
+                print(f"[LIVE] ❌ Order error (sig_type={sig_type}): {err[:120]}")
+                return False, err
+    return False, "all signature types failed"
+
 async def execute_live_buy(direction: str, shares: float, price_cents: int):
     """Execute a real market buy on Polymarket CLOB."""
-    if not clob_client or not live_mode_enabled:
+    if not clob_clients or not live_mode_enabled:
         return
-    try:
-        token_id = live_token_ids.get(direction, "")
-        if not token_id:
-            print(f"[LIVE] ⚠️ No token ID for {direction} — order SKIPPED (simulation only)")
-            return
-        price = round(price_cents / 100.0, 2)
-        order_args = OrderArgs(
-            price=price,
-            size=shares,
-            side="BUY",
-            token_id=token_id
-        )
-        print(f"[LIVE] Placing BUY {shares} {direction.upper()} @ {price_cents}¢ (token={token_id[:16]}...)")
-        signed_order = await asyncio.to_thread(clob_client.create_order, order_args)
-        resp = await asyncio.to_thread(clob_client.post_order, signed_order, OrderType.FOK)
-        print(f"[LIVE] ✅ BUY {shares} {direction.upper()} @ {price_cents}¢ → {resp}")
-    except Exception as e:
-        print(f"[LIVE] ❌ Buy order failed: {e}")
+    token_id = live_token_ids.get(direction, "")
+    if not token_id:
+        print(f"[LIVE] ⚠️ No token ID for {direction} — order SKIPPED (simulation only)")
+        return
+    price = round(price_cents / 100.0, 2)
+    order_args = OrderArgs(price=price, size=shares, side="BUY", token_id=token_id)
+    print(f"[LIVE] Placing BUY {shares} {direction.upper()} @ {price_cents}¢")
+    await _try_order(order_args, OrderType.FOK)
 
 async def execute_live_sell(direction: str, shares: float, price_cents: int):
     """Execute a real market sell on Polymarket CLOB."""
-    if not clob_client or not live_mode_enabled:
+    if not clob_clients or not live_mode_enabled:
         return
-    try:
-        token_id = live_token_ids.get(direction, "")
-        if not token_id:
-            print(f"[LIVE] ⚠️ No token ID for {direction} — sell SKIPPED (simulation only)")
-            return
-        price = round(price_cents / 100.0, 2)
-        order_args = OrderArgs(
-            price=price,
-            size=shares,
-            side="SELL",
-            token_id=token_id
-        )
-        print(f"[LIVE] Placing SELL {shares} {direction.upper()} @ {price_cents}¢ (token={token_id[:16]}...)")
-        signed_order = await asyncio.to_thread(clob_client.create_order, order_args)
-        resp = await asyncio.to_thread(clob_client.post_order, signed_order, OrderType.FOK)
-        print(f"[LIVE] ✅ SELL {shares} {direction.upper()} @ {price_cents}¢ → {resp}")
-    except Exception as e:
-        print(f"[LIVE] ❌ Sell order failed: {e}")
+    token_id = live_token_ids.get(direction, "")
+    if not token_id:
+        print(f"[LIVE] ⚠️ No token ID for {direction} — sell SKIPPED (simulation only)")
+        return
+    price = round(price_cents / 100.0, 2)
+    order_args = OrderArgs(price=price, size=shares, side="SELL", token_id=token_id)
+    print(f"[LIVE] Placing SELL {shares} {direction.upper()} @ {price_cents}¢")
+    await _try_order(order_args, OrderType.FOK)
 
 clients: List[WebSocket] = []
 
