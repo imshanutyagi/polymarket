@@ -440,6 +440,7 @@ async def market_loop():
                 scalper_5.reset_state()
                 scalper_6.reset_state()
                 cycle_warmup_until = time.time() + WARMUP_SECONDS  # Reset warmup for new cycle
+                market.prices_loaded = False  # Force wait for fresh prices on new cycle
                 print(f"[WARMUP] New cycle started. Trading paused for {WARMUP_SECONDS}s to allow price data to settle.")
                 
             # Update dynamic pricing
