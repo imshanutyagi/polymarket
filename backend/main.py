@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import List, Dict
-from strategies import HighFrequencyScalper, TrendScaler
+from strategies import HighFrequencyScalper, TrendScaler, ClaudeStrategy
 
 # --- Live Trading Setup ---
 from dotenv import load_dotenv
@@ -57,6 +57,7 @@ except Exception as e:
 scalper_4 = HighFrequencyScalper()
 scalper_5 = HighFrequencyScalper()
 scalper_6 = TrendScaler()
+claude_strategy = ClaudeStrategy()
 
 app = FastAPI()
 
@@ -259,6 +260,7 @@ active_strategy_e = False
 active_strategy_f = False
 active_strategy_7 = False
 active_strategy_cpt = False  # Strategy C+ Trail
+active_strategy_claude = False  # Claude AI Confluence Strategy
 cpt_entry_time = 0.0  # Timestamp when C+ Trail position was opened
 global_profit_target = 4.0
 strategy_a_strikes = 0
@@ -370,6 +372,9 @@ async def broadcast_state():
                 "strategy_f": active_strategy_f,
                 "strategy_7": active_strategy_7,
                 "strategy_cpt": active_strategy_cpt,
+                "strategy_claude": active_strategy_claude,
+                "claude_confidence": claude_strategy.confidence,
+                "claude_phase": claude_strategy.phase,
                 "profit_target": global_profit_target if global_profit_target != float('inf') else -1,
                 "strikes": strategy_a_strikes,
                 "b_done": strategy_b_trade_done,
@@ -415,7 +420,7 @@ async def sync_live_balance():
             print(f"[LIVE] Balance sync error: {e}")
 
 async def market_loop():
-    global active_strategy_a, active_strategy_b
+    global active_strategy_a, active_strategy_b, active_strategy_claude
     global strategy_a_strikes, strategy_b_trade_done, strategy_a_done
     global cycle_warmup_until
 
@@ -439,6 +444,7 @@ async def market_loop():
                 scalper_4.reset_state()
                 scalper_5.reset_state()
                 scalper_6.reset_state()
+                claude_strategy.reset_state()
                 cycle_warmup_until = time.time() + WARMUP_SECONDS  # Reset warmup for new cycle
                 market.prices_loaded = False  # Force wait for fresh prices on new cycle
                 print(f"[WARMUP] New cycle started. Trading paused for {WARMUP_SECONDS}s to allow price data to settle.")
@@ -473,10 +479,11 @@ async def market_loop():
                         scalper_4.reset_state()
                         scalper_5.reset_state()
                         scalper_6.reset_state()
+                        claude_strategy.reset_state()
                         if active_strategy_a:
                             strategy_a_done = True
                         continue
-                        
+
                     # 2. Trailing SELL: If it spiked > $1.50, we trail it. We only sell if it drops from its peak by a tight $0.15 buffer.
                     elif market.peak_profit > 1.50 and live_profit <= (market.peak_profit - 0.15):
                         portfolio.cash_out(market.up_price, market.down_price)
@@ -485,10 +492,11 @@ async def market_loop():
                         scalper_4.reset_state()
                         scalper_5.reset_state()
                         scalper_6.reset_state()
+                        claude_strategy.reset_state()
                         if active_strategy_a:
                             strategy_a_done = True
                         continue
-                        
+
                     # 3. Panic SELL: Fallback in case peak_profit was >= dynamic target but it crashed completely below it
                     elif market.peak_profit >= dynamic_target and live_profit < dynamic_target:
                         portfolio.cash_out(market.up_price, market.down_price)
@@ -497,6 +505,7 @@ async def market_loop():
                         scalper_4.reset_state()
                         scalper_5.reset_state()
                         scalper_6.reset_state()
+                        claude_strategy.reset_state()
                         if active_strategy_a:
                             strategy_a_done = True
                         continue
@@ -509,6 +518,7 @@ async def market_loop():
                         scalper_4.reset_state()
                         scalper_5.reset_state()
                         scalper_6.reset_state()
+                        claude_strategy.reset_state()
                         if active_strategy_a:
                             strategy_a_done = True
                         continue # Skip remainder of loop
@@ -901,6 +911,64 @@ async def market_loop():
                                 # Revert held positions inside scalper if broke
                                 scalper_obj.held_positions[act["side"]] -= act["shares"]
 
+            # Claude Strategy: AI Confluence Engine
+            if active_strategy_claude:
+                actions = claude_strategy.on_tick(time_left, market.up_price, market.down_price, portfolio, market.history)
+                for act in actions:
+                    if act["action"] in ["market_sell", "limit_sell_fill"]:
+                        revenue = act["shares"] * (act["price"] / 100.0)
+                        portfolio.balance += revenue
+
+                        if portfolio.positions[act["side"]] > 0:
+                            avg_entry = portfolio.spent[act["side"]] / portfolio.positions[act["side"]]
+                        else:
+                            avg_entry = 0.0
+
+                        shares_to_deduct = min(act["shares"], portfolio.positions[act["side"]])
+                        if shares_to_deduct < 0:
+                            shares_to_deduct = 0
+
+                        portfolio.positions[act["side"]] -= shares_to_deduct
+                        portfolio.spent[act["side"]] -= avg_entry * shares_to_deduct
+
+                        if portfolio.spent[act["side"]] < 0 or portfolio.positions[act["side"]] <= 0:
+                            portfolio.spent[act["side"]] = 0.0
+                            portfolio.positions[act["side"]] = 0.0
+
+                        portfolio.total_spent = sum(portfolio.spent.values())
+
+                        cost_basis = avg_entry * act["shares"]
+                        realized_profit = revenue - cost_basis
+                        portfolio.cycle_profit += realized_profit
+                        claude_strategy.cycle_drawdown += min(0, realized_profit)
+                        portfolio.history.append({
+                            'time': datetime.now().strftime("%H:%M:%S"),
+                            'winning_side': f"CLAUDE_{act['side'].upper()}",
+                            'up_shares': round(act["shares"] if act["side"] == 'up' else 0.0, 2),
+                            'down_shares': round(act["shares"] if act["side"] == 'down' else 0.0, 2),
+                            'spent': round(cost_basis, 2),
+                            'payout': round(revenue, 2),
+                            'profit': round(realized_profit, 2)
+                        })
+                        if len(portfolio.history) > 10:
+                            portfolio.history = portfolio.history[-10:]
+
+                        if live_mode_enabled:
+                            asyncio.create_task(execute_live_sell(act["side"], act["shares"], act["price"]))
+
+                    elif act["action"] == "limit_buy_fill":
+                        cost = act["shares"] * (act["price"] / 100.0)
+                        if portfolio.balance >= cost:
+                            portfolio.balance -= cost
+                            portfolio.positions[act["side"]] += act["shares"]
+                            portfolio.total_spent += cost
+                            portfolio.spent[act["side"]] += cost
+
+                            if live_mode_enabled:
+                                asyncio.create_task(execute_live_buy(act["side"], act["shares"], act["price"]))
+                        else:
+                            claude_strategy.held_positions[act["side"]] -= act["shares"]
+
             await broadcast_state()
             await asyncio.sleep(1)
         except Exception as e:
@@ -1081,7 +1149,7 @@ async def websocket_endpoint(websocket: WebSocket):
             cmd = json.loads(data)
             action = cmd.get("action")
             
-            global portfolio, active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing, active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7, active_strategy_cpt, strategy_a_strikes, global_profit_target, live_mode_enabled, live_token_ids
+            global portfolio, active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing, active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7, active_strategy_cpt, active_strategy_claude, strategy_a_strikes, global_profit_target, live_mode_enabled, live_token_ids
             current_portfolio = live_portfolio if live_mode_enabled else paper_portfolio
             portfolio = current_portfolio
             if action == "BUY_UP":
@@ -1108,6 +1176,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 scalper_4.reset_state()
                 scalper_5.reset_state()
                 scalper_6.reset_state()
+                claude_strategy.reset_state()
             elif action == "SET_VOLATILITY":
                 market.volatility = float(cmd.get("value", 0.002))
             elif action == "CHANGE_TIMEFRAME":
@@ -1123,6 +1192,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 scalper_4.reset_state()
                 scalper_5.reset_state()
                 scalper_6.reset_state()
+                claude_strategy.reset_state()
                 market.reset_cycle(market.current_price)
             elif action == "CONNECT_GAMMA":
                 slug = cmd.get("slug", "").strip()
@@ -1153,50 +1223,58 @@ async def websocket_endpoint(websocket: WebSocket):
                     global_profit_target = float(val)
             elif action == "TOGGLE_STRATEGY_A":
                 active_strategy_a = not active_strategy_a
-                if active_strategy_a: 
-                    active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = False
+                if active_strategy_a:
+                    active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = active_strategy_cpt = active_strategy_claude = False
             elif action == "TOGGLE_STRATEGY_B":
                 active_strategy_b = not active_strategy_b
-                if active_strategy_b: 
-                    active_strategy_a = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = False
+                if active_strategy_b:
+                    active_strategy_a = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = active_strategy_cpt = active_strategy_claude = False
             elif action == "TOGGLE_STRATEGY_C":
                 active_strategy_c = not active_strategy_c
                 if active_strategy_c:
-                    paper_portfolio.cycle_profit = 0.0 
-                    live_portfolio.cycle_profit = 0.0 
-                    active_strategy_a = active_strategy_b = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = False
+                    paper_portfolio.cycle_profit = 0.0
+                    live_portfolio.cycle_profit = 0.0
+                    active_strategy_a = active_strategy_b = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = active_strategy_cpt = active_strategy_claude = False
             elif action == "TOGGLE_STRATEGY_C_TRAILING":
                 active_strategy_c_trailing = not active_strategy_c_trailing
                 if active_strategy_c_trailing:
                     paper_portfolio.cycle_profit = 0.0
                     live_portfolio.cycle_profit = 0.0
                     market.peak_profit = 0.0
-                    active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = False
+                    active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = active_strategy_cpt = active_strategy_claude = False
             elif action == "TOGGLE_STRATEGY_D":
                 active_strategy_d = not active_strategy_d
                 if active_strategy_d:
-                    active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_e = active_strategy_f = active_strategy_7 = False
+                    active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_e = active_strategy_f = active_strategy_7 = active_strategy_cpt = active_strategy_claude = False
             elif action == "TOGGLE_STRATEGY_E":
                 active_strategy_e = not active_strategy_e
                 if active_strategy_e:
-                    active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_f = active_strategy_7 = False
+                    active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_f = active_strategy_7 = active_strategy_cpt = active_strategy_claude = False
             elif action == "TOGGLE_STRATEGY_F":
                 active_strategy_f = not active_strategy_f
                 if active_strategy_f:
-                    active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_7 = False
+                    active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_7 = active_strategy_cpt = active_strategy_claude = False
             elif action == "TOGGLE_STRATEGY_7":
                 active_strategy_7 = not active_strategy_7
                 if active_strategy_7:
                     paper_portfolio.cycle_profit = 0.0
                     live_portfolio.cycle_profit = 0.0
-                    active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_cpt = False
+                    active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_cpt = active_strategy_claude = False
             elif action == "TOGGLE_STRATEGY_CPT":
                 active_strategy_cpt = not active_strategy_cpt
                 if active_strategy_cpt:
                     paper_portfolio.cycle_profit = 0.0
                     live_portfolio.cycle_profit = 0.0
                     market.peak_profit = 0.0
-                    active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = False
+                    active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = active_strategy_claude = False
+            elif action == "TOGGLE_STRATEGY_CLAUDE":
+                active_strategy_claude = not active_strategy_claude
+                if active_strategy_claude:
+                    paper_portfolio.cycle_profit = 0.0
+                    live_portfolio.cycle_profit = 0.0
+                    market.peak_profit = 0.0
+                    claude_strategy.reset_state()
+                    active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = active_strategy_cpt = False
             elif action == "TOGGLE_LIVE_MODE":
                 if LIVE_TRADING_AVAILABLE:
                     live_mode_enabled = not live_mode_enabled
@@ -1215,7 +1293,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     json.dump([live_token_ids["up"], live_token_ids["down"]], f)
                 print(f"[LIVE] Token IDs updated: UP={up_token[:20]}... DOWN={down_token[:20]}...")
             elif action == "CLEAR_STRATEGIES":
-                active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = active_strategy_cpt = False
+                active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = active_strategy_cpt = active_strategy_claude = False
                 
     except WebSocketDisconnect:
         clients.remove(websocket)

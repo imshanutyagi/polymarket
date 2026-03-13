@@ -45,6 +45,9 @@ interface StrategiesData {
   strategy_f: boolean;
   strategy_7: boolean;
   strategy_cpt: boolean;
+  strategy_claude: boolean;
+  claude_confidence: number;
+  claude_phase: number;
   profit_target: number;
   strikes: number;
   b_done: boolean;
@@ -64,7 +67,7 @@ function App() {
     balance: 10000.0, positions: { up: 0, down: 0 }, spent: { up: 0, down: 0 }, total_spent: 0, live_profit: 0, live_profit_up: 0, live_profit_down: 0, live_value_up: 0, live_value_down: 0, live_value: 0, history: []
   });
   const [strategies, setStrategies] = useState<StrategiesData>({
-    strategy_a: false, strategy_b: false, strategy_c: false, strategy_c_trailing: false, strategy_d: false, strategy_e: false, strategy_f: false, strategy_7: false, strategy_cpt: false, profit_target: 4.0, strikes: 0, b_done: false, live_mode: false, live_available: false
+    strategy_a: false, strategy_b: false, strategy_c: false, strategy_c_trailing: false, strategy_d: false, strategy_e: false, strategy_f: false, strategy_7: false, strategy_cpt: false, strategy_claude: false, claude_confidence: 0, claude_phase: 1, profit_target: 4.0, strikes: 0, b_done: false, live_mode: false, live_available: false
   });
   const [ws, setWs] = useState<WebSocket | null>(null);
   const [liveSlugInputValue, setLiveSlugInputValue] = useState("");
@@ -454,7 +457,7 @@ function App() {
     if (ws) ws.send(JSON.stringify({ action: "BUY_DOWN", shares: 10 }));
   };
 
-  const toggleStrategy = (strategy: 'A' | 'B' | 'C' | 'C_TRAILING' | 'D' | 'E' | 'F' | '7' | 'CPT') => {
+  const toggleStrategy = (strategy: 'A' | 'B' | 'C' | 'C_TRAILING' | 'D' | 'E' | 'F' | '7' | 'CPT' | 'CLAUDE') => {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ action: `TOGGLE_STRATEGY_${strategy}` }));
     }
@@ -1059,6 +1062,51 @@ function App() {
                   </button>
                 ))}
               </div>
+            </div>
+
+            {/* Claude Strategy: AI Confluence */}
+            <div
+              onClick={() => toggleStrategy('CLAUDE')}
+              className={`p-4 rounded-xl border cursor-pointer transition-colors ${strategies.strategy_claude
+                ? 'bg-violet-900/40 border-violet-500 shadow-[0_0_15px_rgba(139,92,246,0.3)]'
+                : 'bg-gray-800 border-gray-700 hover:border-gray-500'
+                }`}
+            >
+              <div className="flex justify-between items-start mb-2">
+                <h3 className={`font-bold ${strategies.strategy_claude
+                  ? 'text-violet-300'
+                  : 'text-gray-300'
+                  }`}>Claude Strategy: AI Confluence</h3>
+                <div className={`w-5 h-5 rounded-full border flex items-center justify-center ${strategies.strategy_claude
+                  ? 'bg-violet-500 border-violet-500 text-white'
+                  : 'border-gray-600'
+                  }`}>
+                  {strategies.strategy_claude && <Check className="w-3 h-3" />}
+                </div>
+              </div>
+              <p className="text-xs text-gray-500 leading-relaxed mb-3">
+                EMA crossover + RSI + multi-timeframe trend confluence. Phase-aware entry with dynamic position sizing, trailing stops, and $8 max drawdown protection.
+              </p>
+
+              {strategies.strategy_claude && (
+                <div className="flex items-center space-x-3 text-xs font-semibold">
+                  <div className={`px-3 py-1 rounded-lg ${
+                    strategies.claude_phase === 1 ? 'bg-gray-900 text-yellow-400' :
+                    strategies.claude_phase === 2 ? 'bg-gray-900 text-green-400' :
+                    strategies.claude_phase === 3 ? 'bg-gray-900 text-orange-400' :
+                    'bg-gray-900 text-red-400'
+                  }`}>
+                    Phase {strategies.claude_phase}/4 {strategies.claude_phase === 1 ? '(Observing)' : strategies.claude_phase === 2 ? '(Trading)' : strategies.claude_phase === 3 ? '(Cautious)' : '(Exit Only)'}
+                  </div>
+                  <div className={`px-3 py-1 rounded-lg bg-gray-900 ${
+                    strategies.claude_confidence >= 75 ? 'text-green-400' :
+                    strategies.claude_confidence >= 50 ? 'text-yellow-400' :
+                    'text-gray-500'
+                  }`}>
+                    Confidence: {strategies.claude_confidence}%
+                  </div>
+                </div>
+              )}
             </div>
 
           </div>
