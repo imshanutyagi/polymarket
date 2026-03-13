@@ -462,7 +462,7 @@ async def market_loop():
                 down_val = portfolio.positions['down'] * (market.down_price / 100.0)
                 live_profit = (up_val + down_val) - sunk
                 
-                if active_strategy_c_trailing or active_strategy_cpt:
+                if active_strategy_c_trailing or active_strategy_cpt or active_strategy_claude:
                     # Time-Decaying Profit Target
                     dynamic_target = 1.0
                     if time_left <= 300: # 5 mins left
@@ -914,6 +914,27 @@ async def market_loop():
 
             # Claude Strategy: AI Confluence Engine
             if active_strategy_claude:
+                # --- Global Stop-Loss & Timeout for Claude (enforced at main loop level) ---
+                claude_sunk = portfolio.total_spent
+                if claude_sunk > 0:
+                    claude_up_val = portfolio.positions['up'] * (market.up_price / 100.0)
+                    claude_down_val = portfolio.positions['down'] * (market.down_price / 100.0)
+                    claude_live_pnl = (claude_up_val + claude_down_val) - claude_sunk
+
+                    # 10-Min Timeout: holding too long with small profit
+                    if claude_strategy.position_entry_time > 0 and (now - claude_strategy.position_entry_time) >= 600 and claude_live_pnl >= 0.10:
+                        print(f"[CLAUDE] GLOBAL TIMEOUT: +${claude_live_pnl:.2f} after 10min, cashing out")
+                        portfolio.cash_out(market.up_price, market.down_price)
+                        market.peak_profit = 0.0
+                        claude_strategy.reset_state()
+
+                    # $2 Stop-Loss (after first 20 minutes of cycle)
+                    elif time_left <= 2400 and claude_live_pnl <= -2.0:
+                        print(f"[CLAUDE] GLOBAL STOPLOSS: ${claude_live_pnl:.2f}, cutting loss")
+                        portfolio.cash_out(market.up_price, market.down_price)
+                        market.peak_profit = 0.0
+                        claude_strategy.reset_state()
+
                 actions = claude_strategy.on_tick(time_left, market.up_price, market.down_price, portfolio, market.history, portfolio.cycle_profit, global_profit_target)
                 for act in actions:
                     if act["action"] in ["market_sell", "limit_sell_fill"]:

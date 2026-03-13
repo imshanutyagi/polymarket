@@ -544,8 +544,8 @@ class ClaudeStrategy:
 
             # Time since position was opened
             hold_time = now - self.position_entry_time if self.position_entry_time > 0 else 0
-            # Time elapsed in cycle
-            cycle_elapsed = (self.cycle_start_time + 3600 - time_remaining) if self.cycle_start_time > 0 else (3600 - time_remaining)
+            # Time elapsed in cycle (simple: 3600 - time_remaining)
+            cycle_elapsed = 3600.0 - time_remaining
             cycle_elapsed_minutes = cycle_elapsed / 60.0
 
             # --- Phase 4: exit everything (last 5 min) ---
