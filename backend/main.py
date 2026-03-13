@@ -403,7 +403,7 @@ async def sync_live_balance():
                         )
                     data = await asyncio.to_thread(_get_bal)
                     bal_raw = data.get("balance", "0") if isinstance(data, dict) else "0"
-                    usdc = float(bal_raw)
+                    usdc = float(bal_raw) / 1e6  # CLOB returns microUSDC (6 decimals)
                     if usdc > 0:
                         live_portfolio.balance = usdc
                         print(f"[LIVE] Balance synced from CLOB: ${usdc:.2f}")
