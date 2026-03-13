@@ -485,7 +485,7 @@ class ClaudeStrategy:
         return pnl
 
     def on_tick(self, time_remaining: float, up_price: int, down_price: int,
-                portfolio, history: list) -> List[dict]:
+                portfolio, history: list, cycle_profit: float = 0.0, profit_target: float = float('inf')) -> List[dict]:
         """
         Main tick handler. Called every ~1 second.
         Returns list of actions to execute.
@@ -606,6 +606,11 @@ class ClaudeStrategy:
 
         # === ENTRY LOGIC ===
         if not self._has_position() and not self.close_only_mode:
+
+            # Guard: cycle profit target already reached — STOP trading
+            if cycle_profit >= profit_target:
+                self.confidence = 0
+                return actions
 
             # Guard: max drawdown hit
             if self.cycle_drawdown <= self.MAX_DRAWDOWN:

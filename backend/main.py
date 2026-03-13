@@ -914,7 +914,7 @@ async def market_loop():
 
             # Claude Strategy: AI Confluence Engine
             if active_strategy_claude:
-                actions = claude_strategy.on_tick(time_left, market.up_price, market.down_price, portfolio, market.history)
+                actions = claude_strategy.on_tick(time_left, market.up_price, market.down_price, portfolio, market.history, portfolio.cycle_profit, global_profit_target)
                 for act in actions:
                     if act["action"] in ["market_sell", "limit_sell_fill"]:
                         revenue = act["shares"] * (act["price"] / 100.0)
