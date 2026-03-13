@@ -385,6 +385,19 @@ async def broadcast_state():
     for c in disconnected:
         clients.remove(c)
 
+async def sync_live_balance():
+    """Periodically fetch real USDC balance from Polymarket and update live_portfolio."""
+    while True:
+        try:
+            if clob_client and live_mode_enabled:
+                balance_data = clob_client.get_balance()
+                usdc = float(balance_data.get("balance", 0))
+                if usdc > 0:
+                    live_portfolio.balance = usdc
+        except Exception as e:
+            print(f"[LIVE] Balance sync failed: {e}")
+        await asyncio.sleep(30)  # Sync every 30 seconds
+
 async def market_loop():
     global active_strategy_a, active_strategy_b
     global strategy_a_strikes, strategy_b_trade_done, strategy_a_done
@@ -1036,6 +1049,7 @@ async def _poll_live_prices():
 async def startup_event():
     asyncio.create_task(market_loop())
     asyncio.create_task(auto_discover_market())
+    asyncio.create_task(sync_live_balance())
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
