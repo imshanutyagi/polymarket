@@ -1103,7 +1103,15 @@ async def market_loop():
                             cpt_entry_time = 0.0
 
                         elif time_left <= 2400 and live_pnl_cpt <= -2.0:
-                            # We're past the 40-min mark and losing $2+, cut it
+                            # Only stop-loss if the position was entered in the last 40 min.
+                            # Early entries (first 20 min) get to ride it out.
+                            cpt_entry_tl = time_left + (now - cpt_entry_time) if cpt_entry_time > 0 else 0
+                            if cpt_entry_tl <= 2400:
+                                portfolio.cash_out(market.up_price, market.down_price)
+                                market.peak_profit = 0.0
+                                cpt_entry_time = 0.0
+                        # Emergency stop: final 10 min with loss > $3
+                        elif time_left <= 600 and live_pnl_cpt <= -3.0:
                             portfolio.cash_out(market.up_price, market.down_price)
                             market.peak_profit = 0.0
                             cpt_entry_time = 0.0
@@ -1250,9 +1258,24 @@ async def market_loop():
                         market.peak_profit = 0.0
                         claude_strategy.reset_state()
 
-                    # $2 Stop-Loss (after first 20 minutes of cycle)
+                    # $2 Stop-Loss — only for positions that were ENTERED in the last 40 min.
+                    # Positions entered in the first 20 min get to ride out the full cycle (still have time to recover).
+                    # Emergency stop in final 10 min regardless of entry time.
                     elif time_left <= 2400 and claude_live_pnl <= -2.0:
-                        print(f"[CLAUDE] GLOBAL STOPLOSS: ${claude_live_pnl:.2f}, cutting loss")
+                        entry_tl = time_left + (now - claude_strategy.position_entry_time) if claude_strategy.position_entry_time > 0 else 0
+                        if entry_tl <= 2400:
+                            # Entered during last 40 min → apply stop-loss
+                            print(f"[CLAUDE] STOPLOSS (late entry, entry_tl={int(entry_tl)}s): ${claude_live_pnl:.2f}, cutting loss")
+                            record_stat("strategy_claude", claude_live_pnl)
+                            portfolio.cash_out(market.up_price, market.down_price)
+                            market.peak_profit = 0.0
+                            claude_strategy.reset_state()
+                        else:
+                            # Entered in first 20 min — let it ride, skip stop-loss
+                            print(f"[CLAUDE] Holding early-entry position (entry_tl={int(entry_tl)}s, pnl=${claude_live_pnl:.2f}) — still has time to recover")
+                    # Emergency stop: final 10 min, any position with loss > $3
+                    elif time_left <= 600 and claude_live_pnl <= -3.0:
+                        print(f"[CLAUDE] EMERGENCY STOP (last 10min): ${claude_live_pnl:.2f}, cutting loss")
                         record_stat("strategy_claude", claude_live_pnl)
                         portfolio.cash_out(market.up_price, market.down_price)
                         market.peak_profit = 0.0
