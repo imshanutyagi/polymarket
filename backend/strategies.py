@@ -556,18 +556,23 @@ class ClaudeStrategy:
                 exit_reason = "phase4_exit"
 
             # --- ZONE 3: Panic Fallback ---
-            # If profit peaked above $1.00 but crashed below $0.20 → panic sell
-            elif self.profit_ever_hit_target and unrealized < 0.20:
+            # If profit peaked above $1.00 but crashed below it → panic sell instantly
+            elif self.profit_ever_hit_target and unrealized < self.PANIC_SELL_THRESHOLD:
                 should_exit = True
                 exit_reason = f"zone3_panic_sell (peaked ${self.peak_unrealized:.2f}, now ${unrealized:.2f})"
 
-            # --- UNIFIED TRAILING ZONE (> $0.80) ---
-            # Once profit exceeds $0.80, trail it. Exit only if profit drops $0.15 from peak.
-            # This lets the position ride from $1.00 → $1.50 → $2.81 without being cut early.
-            elif unrealized > 0.80:
+            # --- ZONE 1: $1.00–$1.50 — Instant Sell ---
+            # Sell immediately when profit lands in this range (same as C+Trailing)
+            elif self.ZONE1_MIN <= unrealized <= self.ZONE1_MAX:
+                should_exit = True
+                exit_reason = f"zone1_instant_sell (${unrealized:.2f})"
+
+            # --- ZONE 2: > $1.50 — Trailing Stop ---
+            # Let it ride above $1.50, only exit when profit drops $0.15 from peak
+            elif unrealized > self.ZONE1_MAX:
                 if self.peak_unrealized - unrealized >= self.ZONE2_TRAILING_DROP:
                     should_exit = True
-                    exit_reason = f"trailing_sell (peak ${self.peak_unrealized:.2f}, now ${unrealized:.2f})"
+                    exit_reason = f"zone2_trailing_sell (peak ${self.peak_unrealized:.2f}, now ${unrealized:.2f})"
                 # else: let it ride
 
             # --- Graduated Stop-Loss ---

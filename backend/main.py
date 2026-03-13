@@ -516,25 +516,16 @@ async def market_loop():
 
                     did_exit = False
 
-                    if active_strategy_claude:
-                        # Claude Strategy: pure trailing stop — no zone 1 immediate sell.
-                        # Trail from $0.80 peak: exit when profit drops $0.15 from peak.
-                        # This lets the position ride $1.00 → $1.50 → $2.81 without being cut.
-                        if market.peak_profit >= 0.80 and live_profit <= (market.peak_profit - 0.15):
-                            did_exit = True
-                        elif market.peak_profit >= dynamic_target and live_profit < 0.20:
-                            did_exit = True  # Panic: peaked then nearly wiped out
-                    else:
-                        # C+Trailing / CPT: original zone logic
-                        # 1. Immediate Target SELL: If it lands between dynamic target and $1.50, sell instantly.
-                        if dynamic_target <= live_profit <= 1.50:
-                            did_exit = True
-                        # 2. Trailing SELL: spiked > $1.50, trail $0.15 from peak
-                        elif market.peak_profit > 1.50 and live_profit <= (market.peak_profit - 0.15):
-                            did_exit = True
-                        # 3. Panic SELL: peaked above target but crashed below it
-                        elif market.peak_profit >= dynamic_target and live_profit < dynamic_target:
-                            did_exit = True
+                    # Claude + C+Trailing + CPT: same exit logic
+                    # 1. Instant sell when profit hits $1.00–$1.50
+                    if dynamic_target <= live_profit <= 1.50:
+                        did_exit = True
+                    # 2. Trailing sell: spiked > $1.50, exit when drops $0.15 from peak
+                    elif market.peak_profit > 1.50 and live_profit <= (market.peak_profit - 0.15):
+                        did_exit = True
+                    # 3. Panic sell: peaked above target but crashed back below it
+                    elif market.peak_profit >= dynamic_target and live_profit < dynamic_target:
+                        did_exit = True
 
                     if did_exit:
                         portfolio.cash_out(market.up_price, market.down_price)
