@@ -119,6 +119,7 @@ class MarketState:
         self.is_live = False
         self.live_slug = ""
         self.prices_loaded = False  # True only after first real CLOB price update
+        self.transitioning = False  # True while searching for next market (prevents simulator 1c/99c)
         
     def reset_cycle(self, price: float):
         self.price_to_beat = price
@@ -141,12 +142,15 @@ class MarketState:
     def update_pricing(self):
         if self.is_live:
             return # Override: Gamma API updates prices continuously
-            
+
+        if self.transitioning:
+            return  # Searching for next live market — don't override prices with simulator settlement
+
         if self.price_to_beat == 0.0:
             return
-            
+
         time_left = self.get_time_left_seconds()
-        
+
         # Edge case: Market expired
         if time_left == 0:
             if self.current_price > self.price_to_beat:
@@ -1059,7 +1063,8 @@ async def auto_discover_market():
             old_slug = market.live_slug
             if market.is_live:
                 print(f"[AUTO] Cycle ended for {old_slug}, discovering new market...")
-                # Keep is_live=True during search to prevent simulator overriding prices to 1¢/99¢
+                market.is_live = False
+                market.transitioning = True   # Blocks simulator from setting 1c/99c settlement prices
                 market.live_slug = ""
                 live_token_ids.clear()
                 market.prices_loaded = False  # Block trading until new market prices confirmed
@@ -1136,6 +1141,7 @@ async def auto_discover_market():
                                     dn_clamped = max(1, min(99, down_price))
                                     is_stale = (up_clamped <= 5 and dn_clamped >= 94) or (up_clamped >= 94 and dn_clamped <= 5)
                                     market.is_live = True
+                                    market.transitioning = False  # New market found — simulator can run again
                                     market.live_slug = slug
                                     if not is_stale:
                                         market.up_price = up_clamped
