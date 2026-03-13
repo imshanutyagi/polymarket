@@ -386,20 +386,25 @@ async def broadcast_state():
         clients.remove(c)
 
 async def sync_live_balance():
-    """Periodically fetch real USDC balance from Polymarket CLOB and update live_portfolio."""
+    """Periodically fetch real USDC balance from Polymarket and update live_portfolio."""
     while True:
+        await asyncio.sleep(30)
         try:
             if clob_client and live_mode_enabled:
-                from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-                data = clob_client.get_balance_allowance(
-                    BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
-                )
-                usdc = int(data.get("balance", 0)) / 1e6
-                live_portfolio.balance = usdc
-                print(f"[LIVE] Balance synced: ${usdc:.2f}")
+                proxy_address = os.getenv("POLY_PROXY_ADDRESS", "")
+                if proxy_address:
+                    async with httpx.AsyncClient() as client:
+                        resp = await client.get(
+                            f"https://gamma-api.polymarket.com/users?wallet={proxy_address}",
+                            timeout=10.0
+                        )
+                        data = resp.json()
+                        if isinstance(data, list) and len(data) > 0:
+                            usdc = float(data[0].get("portfolioValue", 0))
+                            live_portfolio.balance = usdc
+                            print(f"[LIVE] Balance synced: ${usdc:.2f}")
         except Exception as e:
             print(f"[LIVE] Balance sync failed: {e}")
-        await asyncio.sleep(30)
 
 async def market_loop():
     global active_strategy_a, active_strategy_b
