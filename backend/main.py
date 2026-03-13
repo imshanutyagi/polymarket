@@ -28,6 +28,7 @@ try:
     from py_clob_client.client import ClobClient
     from py_clob_client.clob_types import OrderArgs, OrderType, ApiCreds
     from py_clob_client.constants import POLYGON
+    from py_clob_client.order_builder.constants import BUY, SELL
 
     api_key = os.getenv("POLY_API_KEY", "")
     api_secret = os.getenv("POLY_API_SECRET", "")
@@ -288,18 +289,29 @@ try:
 except:
     pass
 
+async def cancel_all_open_orders():
+    """Cancel all open orders on the CLOB at cycle boundaries."""
+    client = clob_clients.get(0) or clob_clients.get(1) or clob_clients.get(2)
+    if not client or not live_mode_enabled:
+        return
+    try:
+        await asyncio.to_thread(client.cancel_all)
+        print("[LIVE] Cancelled all open orders for new cycle")
+    except Exception as e:
+        print(f"[LIVE] Cancel all failed: {e}")
+
 async def _try_order(order_args: "OrderArgs", order_type: "OrderType") -> tuple:
-    """Place order. BTC Up/Down = neg_risk market. neg_risk via CreateOrderOptions."""
-    # sig_type=1 (POLY_PROXY) is correct for standard Polymarket proxy accounts
-    for sig_type in [1, 0, 2]:
+    """Place order. BTC Up/Down = neg_risk=True (NegRiskCTFExchange). EOA sig_type=0 first."""
+    for sig_type in [0, 1, 2]:  # EOA first — raw private key = sig_type=0
         client = clob_clients.get(sig_type)
         if not client:
             continue
-        for neg_risk in [True, False]:
+        for neg_risk in [True, False]:  # neg_risk=True for BTC Up/Down markets
             try:
                 try:
                     from py_clob_client.clob_types import CreateOrderOptions
-                    opts = CreateOrderOptions(neg_risk=neg_risk)
+                    # tick_size=0.01 for BTC hourly markets, neg_risk via options
+                    opts = CreateOrderOptions(neg_risk=neg_risk, tick_size="0.01")
                     signed = await asyncio.to_thread(client.create_order, order_args, opts)
                 except (ImportError, TypeError):
                     signed = await asyncio.to_thread(client.create_order, order_args)
@@ -328,12 +340,12 @@ async def execute_live_buy(direction: str, shares: float, price_cents: int):
     if not token_id:
         print(f"[LIVE] ⚠️ No token ID for {direction} — order SKIPPED (simulation only)")
         return
-    # Use aggressive price (+2¢) to act as taker and get immediate GTC fill
+    # Aggressive price (+2¢) to cross the spread as taker
     price = round(min(0.97, (price_cents + 2) / 100.0), 2)
     size = round(shares, 2)
-    order_args = OrderArgs(price=price, size=size, side="BUY", token_id=token_id)
+    order_args = OrderArgs(price=price, size=size, side=BUY, token_id=token_id)
     print(f"[LIVE] Placing BUY {size} {direction.upper()} @ {int(price*100)}¢")
-    await _try_order(order_args, OrderType.GTC)
+    await _try_order(order_args, OrderType.FOK)
 
 async def execute_live_sell(direction: str, shares: float, price_cents: int):
     """Execute a real market sell on Polymarket CLOB."""
@@ -343,12 +355,12 @@ async def execute_live_sell(direction: str, shares: float, price_cents: int):
     if not token_id:
         print(f"[LIVE] ⚠️ No token ID for {direction} — sell SKIPPED (simulation only)")
         return
-    # Use aggressive price (-2¢) to act as taker and get immediate GTC fill
+    # Aggressive price (-2¢) to cross the spread as taker
     price = round(max(0.02, (price_cents - 2) / 100.0), 2)
     size = round(shares, 2)
-    order_args = OrderArgs(price=price, size=size, side="SELL", token_id=token_id)
+    order_args = OrderArgs(price=price, size=size, side=SELL, token_id=token_id)
     print(f"[LIVE] Placing SELL {size} {direction.upper()} @ {int(price*100)}¢")
-    await _try_order(order_args, OrderType.GTC)
+    await _try_order(order_args, OrderType.FOK)
 
 clients: List[WebSocket] = []
 
@@ -473,6 +485,7 @@ async def market_loop():
                 claude_strategy.reset_state()
                 cycle_warmup_until = time.time() + WARMUP_SECONDS  # Reset warmup for new cycle
                 market.prices_loaded = False  # Force wait for fresh prices on new cycle
+                asyncio.create_task(cancel_all_open_orders())  # Cancel stale GTC/resting orders
                 print(f"[WARMUP] New cycle started. Trading paused for {WARMUP_SECONDS}s to allow price data to settle.")
                 
             # Update dynamic pricing
@@ -1056,7 +1069,12 @@ async def auto_discover_market():
 
             now_secs = int(time.time())
             from datetime import timezone, timedelta
-            et_offset = timedelta(hours=-4)  # EDT (adjust to -5 for EST)
+            # Auto-detect EST vs EDT using zoneinfo (correct regardless of server location)
+            try:
+                from zoneinfo import ZoneInfo
+                et_offset = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York")).utcoffset()
+            except Exception:
+                et_offset = timedelta(hours=-4)  # fallback EDT
 
             # Generate slug for the CURRENT hour (the active market)
             current_time = datetime.now(timezone.utc)
@@ -1156,10 +1174,10 @@ async def _poll_live_prices():
         if not up_token or not down_token:
             return
 
-        # Fetch prices directly from CLOB REST API (no auth needed, more reliable than py-clob-client reader)
+        # Use /midpoint for real-time prices (more current than last-trade-price)
         async with httpx.AsyncClient(timeout=5.0) as hclient:
-            up_resp = await hclient.get(f"https://clob.polymarket.com/last-trade-price?token_id={up_token}")
-            dn_resp = await hclient.get(f"https://clob.polymarket.com/last-trade-price?token_id={down_token}")
+            up_resp = await hclient.get(f"https://clob.polymarket.com/midpoint?token_id={up_token}")
+            dn_resp = await hclient.get(f"https://clob.polymarket.com/midpoint?token_id={down_token}")
 
         up_data = up_resp.json() if up_resp.status_code == 200 else {}
         dn_data = dn_resp.json() if dn_resp.status_code == 200 else {}
