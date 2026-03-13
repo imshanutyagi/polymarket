@@ -1101,12 +1101,16 @@ async def auto_discover_market():
                                     next_hour = (now_secs // 3600 + 1) * 3600
                                     time_remaining = next_hour - now_secs
 
-                                    # Set market state for new cycle
+                                    # Set market state for new cycle (reject 1¢/99¢ stale prices)
+                                    up_clamped = max(1, min(99, up_price))
+                                    dn_clamped = max(1, min(99, down_price))
+                                    is_stale = (up_clamped <= 2 and dn_clamped >= 97) or (up_clamped >= 97 and dn_clamped <= 2)
                                     market.is_live = True
                                     market.live_slug = slug
-                                    market.up_price = max(1, min(99, up_price))
-                                    market.down_price = max(1, min(99, down_price))
-                                    market.prices_loaded = True
+                                    if not is_stale:
+                                        market.up_price = up_clamped
+                                        market.down_price = dn_clamped
+                                        market.prices_loaded = True
                                     market.cycle_duration = time_remaining
                                     market.cycle_end_time = time.time() + time_remaining
                                     market.history = []  # Clear old chart data
@@ -1154,11 +1158,15 @@ async def _poll_live_prices():
         down_price_raw = await loop.run_in_executor(None, lambda: reader.get_last_trade_price(down_token))
 
         if up_price_raw and up_price_raw.get("price"):
-            market.up_price = max(1, min(99, round(float(up_price_raw["price"]) * 100)))
-            market.prices_loaded = True
-        if down_price_raw and down_price_raw.get("price"):
-            market.down_price = max(1, min(99, round(float(down_price_raw["price"]) * 100)))
-            market.prices_loaded = True
+            up_val = max(1, min(99, round(float(up_price_raw["price"]) * 100)))
+            dn_val = max(1, min(99, round(float(down_price_raw["price"]) * 100))) if (down_price_raw and down_price_raw.get("price")) else market.down_price
+            # Reject stale settlement prices: 1¢/99¢ split = expired market
+            is_stale = (up_val <= 2 and dn_val >= 97) or (up_val >= 97 and dn_val <= 2)
+            if not is_stale:
+                market.up_price = up_val
+                if down_price_raw and down_price_raw.get("price"):
+                    market.down_price = dn_val
+                market.prices_loaded = True
 
         # Derive current_price from Polymarket token prices (up_price as probability)
         market.current_price = market.up_price
