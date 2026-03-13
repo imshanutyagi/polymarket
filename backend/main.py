@@ -507,9 +507,11 @@ async def market_loop():
                 if active_strategy_c_trailing or active_strategy_cpt or active_strategy_claude:
                     # Time-Decaying Profit Target
                     dynamic_target = 1.0
-                    if time_left <= 300: # 5 mins left
+                    if time_left <= 300:   # last 5 min: take $0.40+
                         dynamic_target = 0.40
-                    elif time_left <= 900: # 15 mins left
+                    elif time_left <= 600: # last 10 min: take $0.50+
+                        dynamic_target = 0.50
+                    elif time_left <= 900: # last 15 min: take $0.70+
                         dynamic_target = 0.70
 
                     market.peak_profit = max(live_profit, market.peak_profit)

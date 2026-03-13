@@ -555,11 +555,18 @@ class ClaudeStrategy:
                 should_exit = True
                 exit_reason = "phase4_exit"
 
-            # --- ZONE 1: $1.00–$1.50 — Instant Sell ---
-            # Sell immediately when profit lands in this range (same as C+Trailing)
-            if self.ZONE1_MIN <= unrealized <= self.ZONE1_MAX:
+            # --- ZONE 1: Time-adjusted instant sell ---
+            # Last 10 min: sell at $0.50+  |  Last 5 min: sell at $0.40+  |  Normal: $1.00–$1.50
+            if time_remaining <= 300:
+                zone1_min = 0.40
+            elif time_remaining <= 600:
+                zone1_min = 0.50
+            else:
+                zone1_min = self.ZONE1_MIN  # $1.00
+
+            if zone1_min <= unrealized <= self.ZONE1_MAX:
                 should_exit = True
-                exit_reason = f"zone1_instant_sell (${unrealized:.2f})"
+                exit_reason = f"zone1_instant_sell (${unrealized:.2f}, {int(time_remaining//60)}min left)"
 
             # --- ZONE 2: > $1.50 — Trailing Stop ---
             # Let it ride above $1.50, only exit when profit drops $0.15 from peak
