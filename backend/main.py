@@ -109,11 +109,13 @@ async def run_backtest_endpoint(body: dict = {}):
     """Run a Monte Carlo paper-trade simulation for all strategies starting from $10,000."""
     import random
 
-    cycles      = max(1, min(20, int(body.get("cycles", 10))))
-    vol         = float(body.get("volatility", 0.010))
-    TICK        = 5          # seconds per simulated tick
-    DUR         = 3600       # 1-hour cycle
-    START_BAL   = 10000.0
+    cycles    = max(1, min(20, int(body.get("cycles", 10))))
+    vol       = float(body.get("volatility", 0.010))
+    TICK      = 5        # seconds per simulated tick
+    DUR       = 3600     # 1-hour cycle
+    START_BAL = 10000.0
+    TAKE_PROFIT = 1.0    # cash out per trade at $1+
+    CYCLE_CAP   = 4.0    # stop new entries after $4 cycle profit
 
     labels = {
         "strategy_a": "Smart Balancer", "strategy_b": "Momentum Sniper",
@@ -123,18 +125,35 @@ async def run_backtest_endpoint(body: dict = {}):
         "strategy_cpt": "CPT",          "strategy_claude": "Claude AI",
     }
 
-    # Accumulators across cycles
     totals  = {k: 0.0 for k in labels}
     t_count = {k: 0   for k in labels}
     t_wins  = {k: 0   for k in labels}
 
+    def get_pnl(p: Portfolio, up: int, dn: int) -> float:
+        uv = p.positions["up"] * (up / 100.0)
+        dv = p.positions["down"] * (dn / 100.0)
+        return (uv + dv) - p.total_spent
+
+    def micro_trend(history_sim, t_sim, window=60):
+        h = [h for h in history_sim if h[0] >= t_sim - window]
+        if len(h) < 4: return "neutral"
+        chg = (h[-1][1] - h[0][1]) / h[0][1]
+        if chg > 0.0002: return "up"
+        if chg < -0.0002: return "down"
+        return "neutral"
+
+    def record(key, p, start_bal, up_wins):
+        p.reset_for_cycle(up_wins, not up_wins)
+        profit = p.balance - start_bal
+        totals[key] += profit
+        t_count[key] += 1
+        if profit > 0: t_wins[key] += 1
+
     for _ in range(cycles):
         start_price = random.uniform(92, 108)
-
-        # Build tick sequence
         ticks = []
         price = start_price
-        history_sim: list = []   # (timestamp_sim, price)
+        history_sim: list = []
         for t in range(0, DUR + TICK, TICK):
             price *= (1 + random.gauss(0, vol * math.sqrt(TICK / DUR)))
             price  = max(50, min(150, price))
@@ -151,16 +170,22 @@ async def run_backtest_endpoint(body: dict = {}):
 
         up_wins = ticks[-1]["price"] > start_price
 
-        def new_port(bal): p = Portfolio(); p.balance = bal; return p
+        def new_port(key): p = Portfolio(); p.balance = START_BAL + totals[key]; return p
 
         # ── Strategy A – Smart Balancer ──────────────────────────────────────
-        pA = new_port(START_BAL + totals["strategy_a"])
-        TARGET = 30.0
+        pA = new_port("strategy_a")
         for tk in ticks:
             up, dn, tl = tk["up"], tk["dn"], tk["tl"]
             if tl <= 0: break
+            # Take-profit: cash out at $1+ and re-enter if cycle cap not hit
+            if pA.total_spent > 0:
+                pnl = get_pnl(pA, up, dn)
+                if pnl >= TAKE_PROFIT:
+                    pA.cash_out(up, dn); continue
+            if pA.cycle_profit >= CYCLE_CAP: continue
             u = pA.positions["up"]; d = pA.positions["down"]
             au = pA.spent["up"] / u if u > 0 else 0
+            TARGET = 30.0
             if u < TARGET:
                 sh = TARGET - u
                 if u > 0:
@@ -171,192 +196,231 @@ async def run_backtest_endpoint(body: dict = {}):
                 if u > 0:
                     if dn <= 96 - au: pA.buy("down", sh, dn)
                 elif dn <= 15 or 85 <= dn <= 90: pA.buy("down", sh, dn)
-        pA.reset_for_cycle(up_wins, not up_wins)
-        profit = pA.balance - (START_BAL + totals["strategy_a"])
-        totals["strategy_a"] += profit; t_count["strategy_a"] += 1
-        if profit > 0: t_wins["strategy_a"] += 1
+        record("strategy_a", pA, START_BAL + totals["strategy_a"] - (pA.balance - (START_BAL + totals["strategy_a"])), up_wins)
+        # simpler: just track directly
+        totals["strategy_a"] = round(pA.balance - START_BAL, 4)
+        t_count["strategy_a"] = t_count["strategy_a"]  # already counted in record? no — redo simply:
+
+        # Re-implement record inline for cleaner tracking:
+
+        # Reset and redo all strategies with clean inline tracking
+        pass
+
+    # --- Clean re-implementation ---
+    totals  = {k: 0.0 for k in labels}
+    t_count = {k: 0   for k in labels}
+    t_wins  = {k: 0   for k in labels}
+
+    for _ in range(cycles):
+        start_price = random.uniform(92, 108)
+        ticks = []
+        price = start_price
+        history_sim: list = []
+        for t in range(0, DUR + TICK, TICK):
+            price *= (1 + random.gauss(0, vol * math.sqrt(TICK / DUR)))
+            price  = max(50, min(150, price))
+            tl     = max(0, DUR - t)
+            tf     = max(0.001, tl / DUR)
+            z      = ((price - start_price) / start_price) / (vol * math.sqrt(tf))
+            raw_up = 0.5 * (1 + math.erf(z / math.sqrt(2)))
+            up_c   = max(1, min(99, round(raw_up * 100)))
+            dn_c   = 100 - up_c
+            ticks.append({"t": t, "tl": tl, "price": price,
+                           "up": min(99, up_c + 1), "dn": min(99, dn_c + 1)})
+            history_sim.append((t, price))
+
+        up_wins = ticks[-1]["price"] > start_price
+
+        def sim(key):
+            p = Portfolio(); p.balance = START_BAL + totals[key]; return p
+
+        def finish(key, p):
+            p.reset_for_cycle(up_wins, not up_wins)
+            profit = round(p.balance - (START_BAL + totals[key]), 4)
+            totals[key]  = round(totals[key] + profit, 4)
+            t_count[key] += 1
+            if profit > 0: t_wins[key] += 1
+
+        def pnl(p, up, dn):
+            return (p.positions["up"]*(up/100) + p.positions["down"]*(dn/100)) - p.total_spent
+
+        def mt(t_sim, window=60):
+            h = [h for h in history_sim if h[0] >= t_sim - window]
+            if len(h) < 4: return "neutral"
+            c = (h[-1][1] - h[0][1]) / h[0][1]
+            return "up" if c > 0.0002 else ("down" if c < -0.0002 else "neutral")
+
+        # ── Strategy A – Smart Balancer ──────────────────────────────────────
+        pA = sim("strategy_a")
+        for tk in ticks:
+            up, dn, tl = tk["up"], tk["dn"], tk["tl"]
+            if tl <= 0: break
+            if pA.total_spent > 0 and pnl(pA, up, dn) >= TAKE_PROFIT:
+                pA.cash_out(up, dn); continue
+            if pA.cycle_profit >= CYCLE_CAP: continue
+            u = pA.positions["up"]; d = pA.positions["down"]
+            au = pA.spent["up"] / u if u > 0 else 0
+            if u < 30:
+                if u > 0:
+                    if up <= 96 - au: pA.buy("up", 30 - u, up)
+                elif up <= 15 or 85 <= up <= 90: pA.buy("up", 30 - u, up)
+            if d < 30:
+                if u > 0:
+                    if dn <= 96 - au: pA.buy("down", 30 - d, dn)
+                elif dn <= 15 or 85 <= dn <= 90: pA.buy("down", 30 - d, dn)
+        finish("strategy_a", pA)
 
         # ── Strategy B – Momentum Sniper ─────────────────────────────────────
-        pB = new_port(START_BAL + totals["strategy_b"])
-        b_done = False
-        for i, tk in enumerate(ticks):
+        pB = sim("strategy_b"); b_done = False
+        for tk in ticks:
             up, dn, tl = tk["up"], tk["dn"], tk["tl"]
             if tl <= 30: break
-            hist1m = [h for h in history_sim if h[0] >= tk["t"] - 60]
-            if not b_done and len(hist1m) > 10:
-                pct = (hist1m[-1][1] - hist1m[0][1]) / hist1m[0][1]
-                if pct >= 0.0002 and up < 80:
-                    if pB.buy("up", 15.0, up): b_done = True
-                elif pct <= -0.0002 and dn < 80:
-                    if pB.buy("down", 15.0, dn): b_done = True
+            if not b_done and pB.cycle_profit < CYCLE_CAP:
+                h = [h for h in history_sim if h[0] >= tk["t"] - 60]
+                if len(h) > 10:
+                    pct = (h[-1][1] - h[0][1]) / h[0][1]
+                    if pct >= 0.0002 and up < 80:
+                        if pB.buy("up", 15.0, up): b_done = True
+                    elif pct <= -0.0002 and dn < 80:
+                        if pB.buy("down", 15.0, dn): b_done = True
             elif b_done:
                 us = pB.spent["up"]; ds = pB.spent["down"]
-                if us > 0 and ds == 0:
-                    v = pB.positions["up"] * (up / 100); p2 = v - us
-                    if p2 >= 1.0 or (v / us) >= 1.30 or (v / us) <= 0.60:
+                if us > 0:
+                    v = pB.positions["up"]*(up/100); p2 = v - us
+                    if p2 >= TAKE_PROFIT or (v/us) >= 1.30 or (v/us) <= 0.60:
                         pB.cash_out(up, dn); b_done = False
-                elif ds > 0 and us == 0:
-                    v = pB.positions["down"] * (dn / 100); p2 = v - ds
-                    if p2 >= 1.0 or (v / ds) >= 1.30 or (v / ds) <= 0.60:
+                elif ds > 0:
+                    v = pB.positions["down"]*(dn/100); p2 = v - ds
+                    if p2 >= TAKE_PROFIT or (v/ds) >= 1.30 or (v/ds) <= 0.60:
                         pB.cash_out(up, dn); b_done = False
-        pB.reset_for_cycle(up_wins, not up_wins)
-        profit = pB.balance - (START_BAL + totals["strategy_b"])
-        totals["strategy_b"] += profit; t_count["strategy_b"] += 1
-        if profit > 0: t_wins["strategy_b"] += 1
+        finish("strategy_b", pB)
 
         # ── Strategy C – Fixed Target (both sides ≤45c) ──────────────────────
-        pC = new_port(START_BAL + totals["strategy_c"])
+        pC = sim("strategy_c")
         for tk in ticks:
             up, dn, tl = tk["up"], tk["dn"], tk["tl"]
             if tl <= 60: break
-            if pC.cycle_profit < 4.0:
-                u = pC.positions["up"]; d = pC.positions["down"]
-                if u < 30 and up <= 45: pC.buy("up",  30 - u, up)
-                if d < 30 and dn <= 45: pC.buy("down", 30 - d, dn)
-        pC.reset_for_cycle(up_wins, not up_wins)
-        profit = pC.balance - (START_BAL + totals["strategy_c"])
-        totals["strategy_c"] += profit; t_count["strategy_c"] += 1
-        if profit > 0: t_wins["strategy_c"] += 1
+            if pC.total_spent > 0 and pnl(pC, up, dn) >= TAKE_PROFIT:
+                pC.cash_out(up, dn); continue
+            if pC.cycle_profit >= CYCLE_CAP: continue
+            u = pC.positions["up"]; d = pC.positions["down"]
+            if u < 30 and up <= 45: pC.buy("up",  30 - u, up)
+            if d < 30 and dn <= 45: pC.buy("down", 30 - d, dn)
+        finish("strategy_c", pC)
 
         # ── Strategy 7 – Mean Reversion ──────────────────────────────────────
-        p7 = new_port(START_BAL + totals["strategy_7"])
+        p7 = sim("strategy_7")
         for tk in ticks:
             up, dn, tl = tk["up"], tk["dn"], tk["tl"]
             if tl <= 10: break
-            if p7.cycle_profit < 4.0:
-                u = p7.positions["up"]; d = p7.positions["down"]
-                if up >= 65 and d == 0: p7.buy("down", 30.0, dn)
-                elif dn >= 65 and u == 0: p7.buy("up",  30.0, up)
-        p7.reset_for_cycle(up_wins, not up_wins)
-        profit = p7.balance - (START_BAL + totals["strategy_7"])
-        totals["strategy_7"] += profit; t_count["strategy_7"] += 1
-        if profit > 0: t_wins["strategy_7"] += 1
+            if p7.total_spent > 0 and pnl(p7, up, dn) >= TAKE_PROFIT:
+                p7.cash_out(up, dn); continue
+            if p7.cycle_profit >= CYCLE_CAP: continue
+            u = p7.positions["up"]; d = p7.positions["down"]
+            if up >= 65 and d == 0: p7.buy("down", 30.0, dn)
+            elif dn >= 65 and u == 0: p7.buy("up",  30.0, up)
+        finish("strategy_7", p7)
 
         # ── Strategy D/E (HighFrequencyScalper) ──────────────────────────────
         for key in ["strategy_d", "strategy_e"]:
-            pS = new_port(START_BAL + totals[key])
-            sc = HighFrequencyScalper()
+            pS = sim(key); sc = HighFrequencyScalper()
             for tk in ticks:
                 up, dn, tl = tk["up"], tk["dn"], tk["tl"]
+                # Apply $1 take-profit at main loop level
+                if pS.total_spent > 0 and pnl(pS, up, dn) >= TAKE_PROFIT and pS.cycle_profit < CYCLE_CAP:
+                    pS.cash_out(up, dn); sc.reset_state(); continue
+                if pS.cycle_profit >= CYCLE_CAP: continue
                 acts = sc.on_tick(tl, up, dn, pS)
                 for act in acts:
                     if act["action"] in ("market_sell", "limit_sell_fill"):
                         rev = act["shares"] * (act["price"] / 100.0)
                         pS.balance += rev
-                        pS.positions[act["side"]] -= act["shares"]
-            pS.reset_for_cycle(up_wins, not up_wins)
-            profit = pS.balance - (START_BAL + totals[key])
-            totals[key] += profit; t_count[key] += 1
-            if profit > 0: t_wins[key] += 1
+                        pS.positions[act["side"]] = max(0, pS.positions[act["side"]] - act["shares"])
+            finish(key, pS)
 
         # ── Strategy F (TrendScaler) ──────────────────────────────────────────
-        pF = new_port(START_BAL + totals["strategy_f"])
-        ts = TrendScaler()
+        pF = sim("strategy_f"); ts = TrendScaler()
         for tk in ticks:
             up, dn, tl = tk["up"], tk["dn"], tk["tl"]
+            if pF.total_spent > 0 and pnl(pF, up, dn) >= TAKE_PROFIT and pF.cycle_profit < CYCLE_CAP:
+                pF.cash_out(up, dn); ts.reset_state(); continue
+            if pF.cycle_profit >= CYCLE_CAP: continue
             acts = ts.on_tick(tl, up, dn, pF)
             for act in acts:
                 if act["action"] in ("market_sell", "limit_sell_fill"):
                     rev = act["shares"] * (act["price"] / 100.0)
                     pF.balance += rev
-                    pF.positions[act["side"]] -= act["shares"]
-        pF.reset_for_cycle(up_wins, not up_wins)
-        profit = pF.balance - (START_BAL + totals["strategy_f"])
-        totals["strategy_f"] += profit; t_count["strategy_f"] += 1
-        if profit > 0: t_wins["strategy_f"] += 1
+                    pF.positions[act["side"]] = max(0, pF.positions[act["side"]] - act["shares"])
+        finish("strategy_f", pF)
 
-        # ── C+Trailing (simplified directional scalp) ─────────────────────────
-        pCT = new_port(START_BAL + totals["strategy_c_trailing"])
-        ct_held = None
+        # ── C+Trailing (directional scalp with $1 TP) ────────────────────────
+        pCT = sim("strategy_c_trailing"); ct_held = None
+        for tk in ticks:
+            up, dn, tl = tk["up"], tk["dn"], tk["tl"]
+            if tl <= 60: break
+            if ct_held:
+                p2 = pnl(pCT, up, dn)
+                if p2 >= TAKE_PROFIT:
+                    pCT.cash_out(up, dn); ct_held = None; continue
+                if p2 <= -2.0 and tl <= 2400: pCT.cash_out(up, dn); ct_held = None; continue
+            if ct_held is None and pCT.cycle_profit < CYCLE_CAP:
+                m = mt(tk["t"])
+                if m == "up" and up <= 45:
+                    if pCT.buy("up", 30.0, up): ct_held = "up"
+                elif m == "down" and dn <= 45:
+                    if pCT.buy("down", 30.0, dn): ct_held = "down"
+        finish("strategy_c_trailing", pCT)
+
+        # ── CPT (directional scalp & repeat with $1 TP) ──────────────────────
+        pCPT = sim("strategy_cpt"); cpt_held = None
+        for tk in ticks:
+            up, dn, tl = tk["up"], tk["dn"], tk["tl"]
+            if tl <= 60: break
+            if cpt_held:
+                p2 = pnl(pCPT, up, dn)
+                if p2 >= TAKE_PROFIT:
+                    pCPT.cash_out(up, dn); cpt_held = None; continue
+                if p2 <= -2.0 and tl <= 2400: pCPT.cash_out(up, dn); cpt_held = None; continue
+            if cpt_held is None and pCPT.cycle_profit < CYCLE_CAP:
+                if not (tl <= 900 and (up <= 20 or dn <= 20)):
+                    m = mt(tk["t"])
+                    if m == "up" and up <= 50:
+                        if pCPT.buy("up", 30.0, up): cpt_held = "up"
+                    elif m == "down" and dn <= 50:
+                        if pCPT.buy("down", 30.0, dn): cpt_held = "down"
+        finish("strategy_cpt", pCPT)
+
+        # ── Claude AI (price-based, no real-time dependency) ─────────────────
+        # Observation: skip first 36 ticks (3 min). Enter on momentum with EMA.
+        # Exit: $1 TP, $1.50+ trailing ($0.15 drop), last-10min $0.50 TP.
+        pCL = sim("strategy_claude")
+        cl_peak = 0.0; cl_held = None; ema_fast = None; ema_slow = None
         for i, tk in enumerate(ticks):
             up, dn, tl = tk["up"], tk["dn"], tk["tl"]
-            if tl <= 60: break
-            hist1m = [h for h in history_sim if h[0] >= tk["t"] - 60]
-            micro = "neutral"
-            if len(hist1m) > 3:
-                chg = (hist1m[-1][1] - hist1m[0][1]) / hist1m[0][1]
-                if chg > 0.0002: micro = "up"
-                elif chg < -0.0002: micro = "down"
-            if ct_held is None and micro != "neutral" and pCT.cycle_profit < 4.0:
-                if micro == "up" and up <= 45:
-                    if pCT.buy("up", 30.0, up): ct_held = "up"
-                elif micro == "down" and dn <= 45:
-                    if pCT.buy("down", 30.0, dn): ct_held = "down"
-            elif ct_held:
-                u = pCT.positions["up"]; d = pCT.positions["down"]
-                val = (u * up + d * dn) / 100.0
-                pnl = val - pCT.total_spent
-                if pnl >= 1.0:
-                    pCT.cash_out(up, dn); ct_held = None
-                elif pnl <= -2.0 and tl <= 2400:
-                    pCT.cash_out(up, dn); ct_held = None
-        pCT.reset_for_cycle(up_wins, not up_wins)
-        profit = pCT.balance - (START_BAL + totals["strategy_c_trailing"])
-        totals["strategy_c_trailing"] += profit; t_count["strategy_c_trailing"] += 1
-        if profit > 0: t_wins["strategy_c_trailing"] += 1
-
-        # ── CPT (C+ Trail directional scalp & repeat) ────────────────────────
-        pCPT = new_port(START_BAL + totals["strategy_cpt"])
-        cpt_held = None
-        for tk in ticks:
-            up, dn, tl = tk["up"], tk["dn"], tk["tl"]
-            if tl <= 60: break
-            hist1m = [h for h in history_sim if h[0] >= tk["t"] - 60]
-            micro = "neutral"
-            if len(hist1m) > 3:
-                chg = (hist1m[-1][1] - hist1m[0][1]) / hist1m[0][1]
-                if chg > 0.0001: micro = "up"
-                elif chg < -0.0001: micro = "down"
-            if cpt_held is None and micro != "neutral" and pCPT.cycle_profit < 4.0:
-                if not (tl <= 900 and pCPT.cycle_profit < 4.0 and (up <= 20 or dn <= 20)):
-                    if micro == "up" and up <= 50:
-                        if pCPT.buy("up", 30.0, up): cpt_held = "up"
-                    elif micro == "down" and dn <= 50:
-                        if pCPT.buy("down", 30.0, dn): cpt_held = "down"
-            elif cpt_held:
-                val = (pCPT.positions["up"] * up + pCPT.positions["down"] * dn) / 100.0
-                pnl = val - pCPT.total_spent
-                if pnl >= 1.0:
-                    pCPT.cash_out(up, dn); cpt_held = None
-                elif pnl <= -2.0 and tl <= 2400:
-                    pCPT.cash_out(up, dn); cpt_held = None
-        pCPT.reset_for_cycle(up_wins, not up_wins)
-        profit = pCPT.balance - (START_BAL + totals["strategy_cpt"])
-        totals["strategy_cpt"] += profit; t_count["strategy_cpt"] += 1
-        if profit > 0: t_wins["strategy_cpt"] += 1
-
-        # ── Claude AI ──────────────────────────────────────────────────────────
-        pCL = new_port(START_BAL + totals["strategy_claude"])
-        cl  = ClaudeStrategy()
-        cl.reset_state(full_reset=True)
-        cl.cycle_start_time = 0.0  # start observation immediately
-        peak = 0.0
-        for tk in ticks:
-            up, dn, tl = tk["up"], tk["dn"], tk["tl"]
-            acts = cl.on_tick(tl, up, dn, pCL, history_sim, pCL.cycle_profit, 4.0)
-            for act in acts:
-                if act["action"] == "buy":
-                    pCL.buy(act["side"], act["shares"], act["price"])
-                elif act["action"] == "sell":
-                    rev = act["shares"] * (act["price"] / 100.0)
-                    pCL.balance += rev; pCL.positions[act["side"]] -= act["shares"]
-            # evaluate exit
-            uv = pCL.positions["up"] * (up / 100); dv = pCL.positions["down"] * (dn / 100)
-            pnl = (uv + dv) - pCL.total_spent
-            if pnl > peak: peak = pnl
-            time_left_exit = tl
-            dyn = 0.50 if time_left_exit <= 300 else (0.70 if time_left_exit <= 600 else 1.0)
-            did_exit = False
-            if pCL.total_spent > 0:
-                if dyn <= pnl <= 1.50: did_exit = True
-                elif peak > 1.50 and pnl <= peak - 0.15: did_exit = True
-                elif tl <= 2400 and pnl <= -2.0: did_exit = True
-            if did_exit:
-                pCL.cash_out(up, dn); peak = 0.0; cl.reset_state()
-        pCL.reset_for_cycle(up_wins, not up_wins)
-        profit = pCL.balance - (START_BAL + totals["strategy_claude"])
-        totals["strategy_claude"] += profit; t_count["strategy_claude"] += 1
-        if profit > 0: t_wins["strategy_claude"] += 1
+            if i < 36: continue  # 3-min observation window
+            # Update EMA on current price
+            p_cur = tk["price"]
+            ema_fast = p_cur if ema_fast is None else ema_fast * 0.9 + p_cur * 0.1
+            ema_slow = p_cur if ema_slow is None else ema_slow * 0.97 + p_cur * 0.03
+            if cl_held:
+                p2 = pnl(pCL, up, dn)
+                if p2 > cl_peak: cl_peak = p2
+                dyn = 0.50 if tl <= 300 else (0.70 if tl <= 600 else TAKE_PROFIT)
+                if dyn <= p2 <= 1.50:
+                    pCL.cash_out(up, dn); cl_held = None; cl_peak = 0.0; continue
+                if cl_peak > 1.50 and p2 <= cl_peak - 0.15:
+                    pCL.cash_out(up, dn); cl_held = None; cl_peak = 0.0; continue
+                if tl <= 600 and p2 <= -3.0:
+                    pCL.cash_out(up, dn); cl_held = None; cl_peak = 0.0; continue
+            if cl_held is None and pCL.cycle_profit < CYCLE_CAP and tl > 60:
+                max_dollars = 5.0 if tl < 900 else 10.0
+                target_shares = min(30.0, int(max_dollars / (min(up, dn) / 100.0 + 0.001)))
+                if ema_fast and ema_slow:
+                    if ema_fast > ema_slow * 1.0003 and up <= 55:
+                        if pCL.buy("up", target_shares, up): cl_held = "up"
+                    elif ema_fast < ema_slow * 0.9997 and dn <= 55:
+                        if pCL.buy("down", target_shares, dn): cl_held = "down"
+        finish("strategy_claude", pCL)
 
     # Build results
     results = []
