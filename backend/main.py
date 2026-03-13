@@ -507,37 +507,32 @@ async def market_loop():
                         dynamic_target = 0.40
                     elif time_left <= 900: # 15 mins left
                         dynamic_target = 0.70
-                        
+
                     market.peak_profit = max(live_profit, market.peak_profit)
-                    
-                    # 1. Immediate Target SELL: If it lands between dynamic target and $1.50, sell instantly. No waiting.
-                    if dynamic_target <= live_profit <= 1.50:
-                        portfolio.cash_out(market.up_price, market.down_price)
-                        market.peak_profit = 0.0
-                        strategy_a_strikes = 0
-                        scalper_4.reset_state()
-                        scalper_5.reset_state()
-                        scalper_6.reset_state()
-                        claude_strategy.reset_state()
-                        if active_strategy_a:
-                            strategy_a_done = True
-                        continue
 
-                    # 2. Trailing SELL: If it spiked > $1.50, we trail it. We only sell if it drops from its peak by a tight $0.15 buffer.
-                    elif market.peak_profit > 1.50 and live_profit <= (market.peak_profit - 0.15):
-                        portfolio.cash_out(market.up_price, market.down_price)
-                        market.peak_profit = 0.0
-                        strategy_a_strikes = 0
-                        scalper_4.reset_state()
-                        scalper_5.reset_state()
-                        scalper_6.reset_state()
-                        claude_strategy.reset_state()
-                        if active_strategy_a:
-                            strategy_a_done = True
-                        continue
+                    did_exit = False
 
-                    # 3. Panic SELL: Fallback in case peak_profit was >= dynamic target but it crashed completely below it
-                    elif market.peak_profit >= dynamic_target and live_profit < dynamic_target:
+                    if active_strategy_claude:
+                        # Claude Strategy: pure trailing stop — no zone 1 immediate sell.
+                        # Trail from $0.80 peak: exit when profit drops $0.15 from peak.
+                        # This lets the position ride $1.00 → $1.50 → $2.81 without being cut.
+                        if market.peak_profit >= 0.80 and live_profit <= (market.peak_profit - 0.15):
+                            did_exit = True
+                        elif market.peak_profit >= dynamic_target and live_profit < 0.20:
+                            did_exit = True  # Panic: peaked then nearly wiped out
+                    else:
+                        # C+Trailing / CPT: original zone logic
+                        # 1. Immediate Target SELL: If it lands between dynamic target and $1.50, sell instantly.
+                        if dynamic_target <= live_profit <= 1.50:
+                            did_exit = True
+                        # 2. Trailing SELL: spiked > $1.50, trail $0.15 from peak
+                        elif market.peak_profit > 1.50 and live_profit <= (market.peak_profit - 0.15):
+                            did_exit = True
+                        # 3. Panic SELL: peaked above target but crashed below it
+                        elif market.peak_profit >= dynamic_target and live_profit < dynamic_target:
+                            did_exit = True
+
+                    if did_exit:
                         portfolio.cash_out(market.up_price, market.down_price)
                         market.peak_profit = 0.0
                         strategy_a_strikes = 0
@@ -960,8 +955,9 @@ async def market_loop():
                     claude_down_val = portfolio.positions['down'] * (market.down_price / 100.0)
                     claude_live_pnl = (claude_up_val + claude_down_val) - claude_sunk
 
-                    # 10-Min Timeout: holding too long with small profit
-                    if claude_strategy.position_entry_time > 0 and (now - claude_strategy.position_entry_time) >= 600 and claude_live_pnl >= 0.10:
+                    # 10-Min Timeout: only force-close small-profit positions (< $0.80).
+                    # High-profit positions are managed by the trailing stop — don't cut them on a timer.
+                    if claude_strategy.position_entry_time > 0 and (now - claude_strategy.position_entry_time) >= 600 and 0.10 <= claude_live_pnl < 0.80:
                         print(f"[CLAUDE] GLOBAL TIMEOUT: +${claude_live_pnl:.2f} after 10min, cashing out")
                         portfolio.cash_out(market.up_price, market.down_price)
                         market.peak_profit = 0.0
