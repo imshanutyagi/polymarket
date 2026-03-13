@@ -245,7 +245,7 @@ class Portfolio:
 market = MarketState()
 paper_portfolio = Portfolio()
 live_portfolio = Portfolio()
-live_portfolio.balance = 0.0
+live_portfolio.balance = float(os.getenv("INITIAL_BALANCE", "0.0"))
 portfolio = paper_portfolio
 
 # Strategies State
@@ -388,27 +388,30 @@ async def broadcast_state():
         clients.remove(c)
 
 async def sync_live_balance():
-    """Periodically fetch real USDC balance from Polymarket CLOB (deposited balance)."""
+    """Periodically try to sync USDC balance from Polymarket CLOB."""
     while True:
-        await asyncio.sleep(30)
+        await asyncio.sleep(60)
         try:
             if not clob_client or not live_mode_enabled:
                 continue
             from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-            def _get_bal():
-                return clob_client.get_balance_allowance(
-                    BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=1)
-                )
-            data = await asyncio.to_thread(_get_bal)
-            print(f"[LIVE] Balance raw response: {data}")
-            bal_raw = data.get("balance", "0") if isinstance(data, dict) else "0"
-            raw_float = float(bal_raw)
-            # Polymarket returns balance in USDC units (not micro), just use directly
-            usdc = raw_float if raw_float < 1e9 else raw_float / 1e6
-            live_portfolio.balance = usdc
-            print(f"[LIVE] Balance synced: ${usdc:.2f}")
+            for sig_type in [0, 1, 2]:
+                try:
+                    def _get_bal(st=sig_type):
+                        return clob_client.get_balance_allowance(
+                            BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=st)
+                        )
+                    data = await asyncio.to_thread(_get_bal)
+                    bal_raw = data.get("balance", "0") if isinstance(data, dict) else "0"
+                    usdc = float(bal_raw)
+                    if usdc > 0:
+                        live_portfolio.balance = usdc
+                        print(f"[LIVE] Balance synced from CLOB: ${usdc:.2f}")
+                        break
+                except Exception:
+                    pass
         except Exception as e:
-            print(f"[LIVE] Balance sync failed: {e}")
+            print(f"[LIVE] Balance sync error: {e}")
 
 async def market_loop():
     global active_strategy_a, active_strategy_b
