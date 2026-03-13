@@ -391,16 +391,29 @@ async def sync_live_balance():
         await asyncio.sleep(30)
         try:
             if clob_client and live_mode_enabled:
+                # Try all signature types to find USDC balance
                 from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-                def _get_bal():
-                    return clob_client.get_balance_allowance(
-                        BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=1)
-                    )
-                data = await asyncio.to_thread(_get_bal)
-                raw = int(data.get("balance", "0"))
-                usdc = raw / 1e6
-                live_portfolio.balance = usdc
-                print(f"[LIVE] Balance synced: ${usdc:.2f}")
+                found = False
+                for sig_type in [0, 1, 2]:
+                    try:
+                        def _get_bal(st=sig_type):
+                            return clob_client.get_balance_allowance(
+                                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=st)
+                            )
+                        data = await asyncio.to_thread(_get_bal)
+                        print(f"[LIVE] Balance raw (sig_type={sig_type}): {data}")
+                        bal_raw = data.get("balance", "0") if isinstance(data, dict) else "0"
+                        raw = int(float(bal_raw))
+                        usdc = raw / 1e6
+                        if usdc > 0:
+                            live_portfolio.balance = usdc
+                            print(f"[LIVE] Balance synced: ${usdc:.2f} (sig_type={sig_type})")
+                            found = True
+                            break
+                    except Exception as inner_e:
+                        print(f"[LIVE] sig_type={sig_type} failed: {inner_e}")
+                if not found:
+                    print("[LIVE] Balance is 0 across all sig_types — keeping current balance")
         except Exception as e:
             print(f"[LIVE] Balance sync failed: {e}")
 
