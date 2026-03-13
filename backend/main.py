@@ -386,34 +386,33 @@ async def broadcast_state():
         clients.remove(c)
 
 async def sync_live_balance():
-    """Periodically fetch real USDC balance from Polymarket and update live_portfolio."""
+    """Periodically fetch real USDC balance from proxy wallet via Polygon RPC."""
+    USDC_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+    POLYGON_RPC = "https://polygon-rpc.com"
     while True:
         await asyncio.sleep(30)
         try:
-            if clob_client and live_mode_enabled:
-                # Try all signature types to find USDC balance
-                from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-                found = False
-                for sig_type in [0, 1, 2]:
-                    try:
-                        def _get_bal(st=sig_type):
-                            return clob_client.get_balance_allowance(
-                                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=st)
-                            )
-                        data = await asyncio.to_thread(_get_bal)
-                        print(f"[LIVE] Balance raw (sig_type={sig_type}): {data}")
-                        bal_raw = data.get("balance", "0") if isinstance(data, dict) else "0"
-                        raw = int(float(bal_raw))
-                        usdc = raw / 1e6
-                        if usdc > 0:
-                            live_portfolio.balance = usdc
-                            print(f"[LIVE] Balance synced: ${usdc:.2f} (sig_type={sig_type})")
-                            found = True
-                            break
-                    except Exception as inner_e:
-                        print(f"[LIVE] sig_type={sig_type} failed: {inner_e}")
-                if not found:
-                    print("[LIVE] Balance is 0 across all sig_types — keeping current balance")
+            if not live_mode_enabled:
+                continue
+            wallet = os.getenv("POLY_PROXY_ADDRESS", "").strip()
+            if not wallet:
+                print("[LIVE] Balance sync skipped: POLY_PROXY_ADDRESS not set")
+                continue
+            # ERC-20 balanceOf(address): selector 0x70a08231 + 32-byte padded address
+            padded = wallet.lower().replace("0x", "").zfill(64)
+            call_data = "0x70a08231" + padded
+            payload = {
+                "jsonrpc": "2.0", "method": "eth_call",
+                "params": [{"to": USDC_CONTRACT, "data": call_data}, "latest"],
+                "id": 1
+            }
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(POLYGON_RPC, json=payload)
+                result = resp.json().get("result", "0x0")
+            raw = int(result, 16)
+            usdc = raw / 1e6
+            live_portfolio.balance = usdc
+            print(f"[LIVE] Balance synced: ${usdc:.2f} (proxy={wallet[:8]}...)")
         except Exception as e:
             print(f"[LIVE] Balance sync failed: {e}")
 
