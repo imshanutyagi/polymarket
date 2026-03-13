@@ -1063,9 +1063,10 @@ async def auto_discover_market():
             old_slug = market.live_slug
             if market.is_live:
                 print(f"[AUTO] Cycle ended for {old_slug}, discovering new market...")
-                market.is_live = False
+                # Keep is_live=True during search to prevent simulator overriding prices to 1¢/99¢
                 market.live_slug = ""
                 live_token_ids.clear()
+                market.prices_loaded = False  # Block trading until new market prices confirmed
 
             now_secs = int(time.time())
             from datetime import timezone, timedelta
@@ -1134,10 +1135,10 @@ async def auto_discover_market():
                                     next_hour = (now_secs // 3600 + 1) * 3600
                                     time_remaining = next_hour - now_secs
 
-                                    # Set market state for new cycle (reject 1¢/99¢ stale prices)
+                                    # Set market state for new cycle (reject stale/thin-book prices)
                                     up_clamped = max(1, min(99, up_price))
                                     dn_clamped = max(1, min(99, down_price))
-                                    is_stale = (up_clamped <= 2 and dn_clamped >= 97) or (up_clamped >= 97 and dn_clamped <= 2)
+                                    is_stale = (up_clamped <= 5 and dn_clamped >= 94) or (up_clamped >= 94 and dn_clamped <= 5)
                                     market.is_live = True
                                     market.live_slug = slug
                                     if not is_stale:
@@ -1185,8 +1186,8 @@ async def _poll_live_prices():
         if up_data.get("price"):
             up_val = max(1, min(99, round(float(up_data["price"]) * 100)))
             dn_val = max(1, min(99, round(float(dn_data["price"]) * 100))) if dn_data.get("price") else market.down_price
-            # Reject stale settlement prices: 1¢/99¢ split = expired market
-            is_stale = (up_val <= 2 and dn_val >= 97) or (up_val >= 97 and dn_val <= 2)
+            # Reject stale/thin-book prices: expired or illiquid new market
+            is_stale = (up_val <= 5 and dn_val >= 94) or (up_val >= 94 and dn_val <= 5)
             if not is_stale:
                 market.up_price = up_val
                 if dn_data.get("price"):
