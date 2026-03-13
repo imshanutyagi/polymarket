@@ -5,7 +5,9 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebFetch(domain:robottraders.io)",
       "WebFetch(domain:quantpylib.hangukquant.com)",
-      "WebFetch(domain:medium.com)"
+      "WebFetch(domain:medium.com)",
+      "Bash(python -c \"from py_clob_client.client import ClobClient; print\\([m for m in dir\\(ClobClient\\) if ''balance'' in m.lower\\(\\) or ''fund'' in m.lower\\(\\) or ''usdc'' in m.lower\\(\\)]\\)\")",
+      "Bash(python -c \"from py_clob_client.clob_types import BalanceAllowanceParams, AssetType; p = BalanceAllowanceParams\\(asset_type=AssetType.COLLATERAL\\); print\\(p\\)\")"
     ]
   }
 }

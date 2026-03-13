@@ -391,18 +391,16 @@ async def sync_live_balance():
         await asyncio.sleep(30)
         try:
             if clob_client and live_mode_enabled:
-                proxy_address = os.getenv("POLY_PROXY_ADDRESS", "")
-                if proxy_address:
-                    async with httpx.AsyncClient() as client:
-                        resp = await client.get(
-                            f"https://gamma-api.polymarket.com/users?wallet={proxy_address}",
-                            timeout=10.0
-                        )
-                        data = resp.json()
-                        if isinstance(data, list) and len(data) > 0:
-                            usdc = float(data[0].get("portfolioValue", 0))
-                            live_portfolio.balance = usdc
-                            print(f"[LIVE] Balance synced: ${usdc:.2f}")
+                from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+                def _get_bal():
+                    return clob_client.get_balance_allowance(
+                        BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=1)
+                    )
+                data = await asyncio.to_thread(_get_bal)
+                raw = int(data.get("balance", "0"))
+                usdc = raw / 1e6
+                live_portfolio.balance = usdc
+                print(f"[LIVE] Balance synced: ${usdc:.2f}")
         except Exception as e:
             print(f"[LIVE] Balance sync failed: {e}")
 
