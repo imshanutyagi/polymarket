@@ -358,6 +358,10 @@ function App() {
       socket.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
+          if (msg.type === "error") {
+            alert(`⚠️ ${msg.message}`);
+            return;
+          }
           if (msg.type === "state_update") {
             setMarket(msg.data.market);
             setPortfolio(msg.data.portfolio);

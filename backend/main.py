@@ -311,6 +311,12 @@ async def _try_order(order_args: "OrderArgs", order_type: "OrderType") -> tuple:
                 print(f"[LIVE] sig_type={sig_type} neg_risk={neg_risk}: {err[:120]}")
                 if any(x in err for x in ["invalid signature", "Unauthorized", "not supported", "invalid amounts"]):
                     continue
+                if "not enough balance" in err or "allowance" in err.lower():
+                    for ws in clients:
+                        try:
+                            await ws.send_text('{"type":"error","message":"Insufficient CLOB balance — deposit USDC to your Polymarket wallet to enable live trading."}')
+                        except Exception:
+                            pass
                 return False, err
     return False, "all combinations failed"
 
