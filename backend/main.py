@@ -289,36 +289,29 @@ except:
     pass
 
 async def _try_order(order_args: "OrderArgs", order_type: "OrderType") -> tuple:
-    """Try placing an order with all sig_types × neg_risk combinations."""
-    # BTC Up/Down markets use NegRiskCTFExchange — try neg_risk=True first
-    for neg_risk in [True, False]:
-        for sig_type in [0, 1, 2]:
-            client = clob_clients.get(sig_type)
-            if not client:
-                continue
+    """Place order. BTC Up/Down = neg_risk market. neg_risk via CreateOrderOptions."""
+    # sig_type=1 (POLY_PROXY) is correct for standard Polymarket proxy accounts
+    for sig_type in [1, 0, 2]:
+        client = clob_clients.get(sig_type)
+        if not client:
+            continue
+        for neg_risk in [True, False]:
             try:
-                # Clone order_args with neg_risk flag if supported
                 try:
-                    args = OrderArgs(
-                        price=order_args.price,
-                        size=order_args.size,
-                        side=order_args.side,
-                        token_id=order_args.token_id,
-                        neg_risk=neg_risk
-                    )
-                except TypeError:
-                    args = order_args  # older py-clob-client without neg_risk param
-                signed = await asyncio.to_thread(client.create_order, args)
+                    from py_clob_client.clob_types import CreateOrderOptions
+                    opts = CreateOrderOptions(neg_risk=neg_risk)
+                    signed = await asyncio.to_thread(client.create_order, order_args, opts)
+                except (ImportError, TypeError):
+                    signed = await asyncio.to_thread(client.create_order, order_args)
                 resp = await asyncio.to_thread(client.post_order, signed, order_type)
                 print(f"[LIVE] ✅ Order placed (sig_type={sig_type}, neg_risk={neg_risk}) → {resp}")
                 return True, resp
             except Exception as e:
                 err = str(e)
-                print(f"[LIVE] sig_type={sig_type} neg_risk={neg_risk} failed: {err[:100]}")
-                if "invalid signature" in err or "Unauthorized" in err or "not supported" in err.lower():
+                print(f"[LIVE] sig_type={sig_type} neg_risk={neg_risk}: {err[:120]}")
+                if any(x in err for x in ["invalid signature", "Unauthorized", "not supported", "invalid amounts"]):
                     continue
-                else:
-                    return False, err
+                return False, err
     return False, "all combinations failed"
 
 async def execute_live_buy(direction: str, shares: float, price_cents: int):
