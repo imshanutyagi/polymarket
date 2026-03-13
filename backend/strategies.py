@@ -460,14 +460,16 @@ class ClaudeStrategy:
 
     def _get_phase(self, time_left: float, cycle_duration: float) -> int:
         """Determine trading phase based on time remaining."""
-        elapsed = cycle_duration - time_left
-        if elapsed < 300:        # First 5 min: observe (build indicator baselines)
+        # Use time since Claude was activated (not cycle elapsed) so it always
+        # observes for 5 min on first enable, even mid-cycle.
+        claude_elapsed = time.time() - self.cycle_start_time if self.cycle_start_time > 0 else 0
+        if claude_elapsed < 300:     # First 5 min since activation: observe only
             return 1
-        elif time_left > 900:   # >15 min left: active trading
+        elif time_left > 900:        # >15 min left: active trading
             return 2
-        elif time_left > 300:   # 5-15 min left: high confidence only
+        elif time_left > 300:        # 5-15 min left: high confidence only
             return 3
-        else:                   # Last 5 min: exit only
+        else:                        # Last 5 min: exit only
             return 4
 
     def _has_position(self) -> bool:
