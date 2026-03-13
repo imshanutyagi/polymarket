@@ -70,7 +70,7 @@ function App() {
   const [liveSlugInputValue, setLiveSlugInputValue] = useState("");
   const [activeLiveSlug, setActiveLiveSlug] = useState("");
   const [isSyncing, setIsSyncing] = useState(false);
-  const [isAutoPilotEnabled, setIsAutoPilotEnabled] = useState(false);
+  const [isAutoPilotEnabled, setIsAutoPilotEnabled] = useState(true);
   const manualTargetRef = useRef<number | null>(null);
   const [isTargetEditing, setIsTargetEditing] = useState(false);
   const lastAutoTargetHour = useRef<number>(-1);
