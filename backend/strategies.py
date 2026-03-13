@@ -313,23 +313,26 @@ class ClaudeStrategy:
         self.cycle_start_time = 0.0
         self.exit_reason = ""              # last exit reason for logging
 
-    def reset_state(self):
+    def reset_state(self, full_reset: bool = False):
+        """Reset after a trade exit. Keeps cycle_start_time so 3-min observation
+        only runs once per cycle. Use full_reset=True on new cycle or redeploy."""
         self.held_positions = {'up': 0.0, 'down': 0.0}
         self.held_avg_cost = {'up': 0.0, 'down': 0.0}
-        self.ema_fast = None
-        self.ema_slow = None
-        self.rsi_prices = []
-        self.tick_count = 0
         self.last_entry_time = 0.0
         self.position_entry_time = 0.0
-        self.cycle_drawdown = 0.0
         self.peak_unrealized = 0.0
         self.profit_ever_hit_target = False
-        self.confidence = 0
-        self.phase = 1
         self.close_only_mode = False
-        self.cycle_start_time = 0.0
         self.exit_reason = ""
+        if full_reset:
+            self.ema_fast = None
+            self.ema_slow = None
+            self.rsi_prices = []
+            self.tick_count = 0
+            self.cycle_drawdown = 0.0
+            self.confidence = 0
+            self.phase = 1
+            self.cycle_start_time = 0.0  # Resets observation timer
 
     def _update_ema(self, price: float):
         """Update fast and slow exponential moving averages."""

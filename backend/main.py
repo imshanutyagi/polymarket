@@ -502,7 +502,7 @@ async def market_loop():
                 scalper_4.reset_state()
                 scalper_5.reset_state()
                 scalper_6.reset_state()
-                claude_strategy.reset_state()
+                claude_strategy.reset_state(full_reset=True)
                 market.prices_loaded = False  # Force wait for fresh prices on new cycle
                 asyncio.create_task(cancel_all_open_orders())  # Cancel stale GTC/resting orders
                 print(f"[CYCLE] New cycle started. Per-strategy guards active (prices_loaded, Claude observation).")
@@ -1261,7 +1261,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 scalper_4.reset_state()
                 scalper_5.reset_state()
                 scalper_6.reset_state()
-                claude_strategy.reset_state()
+                claude_strategy.reset_state(full_reset=True)
             elif action == "SET_VOLATILITY":
                 market.volatility = float(cmd.get("value", 0.002))
             elif action == "CHANGE_TIMEFRAME":
@@ -1277,7 +1277,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 scalper_4.reset_state()
                 scalper_5.reset_state()
                 scalper_6.reset_state()
-                claude_strategy.reset_state()
+                claude_strategy.reset_state(full_reset=True)
                 market.reset_cycle(market.current_price)
             elif action == "CONNECT_GAMMA":
                 slug = cmd.get("slug", "").strip()
@@ -1358,7 +1358,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     paper_portfolio.cycle_profit = 0.0
                     live_portfolio.cycle_profit = 0.0
                     market.peak_profit = 0.0
-                    claude_strategy.reset_state()
+                    claude_strategy.reset_state(full_reset=True)
                     active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = active_strategy_cpt = False
             elif action == "TOGGLE_LIVE_MODE":
                 if LIVE_TRADING_AVAILABLE:
