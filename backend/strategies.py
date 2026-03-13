@@ -463,7 +463,7 @@ class ClaudeStrategy:
         # Use time since Claude was activated (not cycle elapsed) so it always
         # observes for 5 min on first enable, even mid-cycle.
         claude_elapsed = time.time() - self.cycle_start_time if self.cycle_start_time > 0 else 0
-        if claude_elapsed < 300:     # First 5 min since activation: observe only
+        if claude_elapsed < 180:     # First 3 min since activation: observe only
             return 1
         elif time_left > 900:        # >15 min left: active trading
             return 2
