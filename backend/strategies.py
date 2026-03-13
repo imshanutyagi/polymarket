@@ -706,9 +706,19 @@ class ClaudeStrategy:
             else:
                 max_dollars = 10.0
 
-            # Last 15 min: cap spend at $5 regardless of confidence (protect capital late cycle)
+            # Last 15 min: scale max spend by how extreme the odds are
+            # 95/5 or 90/10 (underdog ≤10c) → max $1
+            # 80/20 or 60/40 (underdog 11–40c) → max $3
+            # 50/50 area or balanced        → max $5
             if time_remaining < 900:
-                max_dollars = min(max_dollars, 5.0)
+                cheaper_side = min(up_price, down_price)
+                if cheaper_side <= 10:
+                    late_cap = 1.0
+                elif cheaper_side <= 40:
+                    late_cap = 3.0
+                else:
+                    late_cap = 5.0
+                max_dollars = min(max_dollars, late_cap)
 
             price_per_share = favored_price / 100.0
             shares = round(max_dollars / price_per_share, 1)
