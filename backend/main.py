@@ -1418,12 +1418,6 @@ async def auto_discover_market():
     
     while True:
         try:
-            # Only auto-discover if we have CLOB client and no live market is connected yet,
-            # OR if the current market expired (time_left <= 5)
-            if not LIVE_TRADING_AVAILABLE:
-                await asyncio.sleep(30)
-                continue
-
             if market.is_live and market.get_time_left_seconds() > 10:
                 # Already synced and market is active, just poll prices
                 await _poll_live_prices()
@@ -1545,7 +1539,36 @@ async def _poll_live_prices():
     try:
         up_token = live_token_ids.get("up", "")
         down_token = live_token_ids.get("down", "")
+
+        # Paper-trading mode (no token IDs): poll Gamma API for prices instead
         if not up_token or not down_token:
+            slug = market.live_slug
+            if not slug:
+                return
+            async with httpx.AsyncClient(timeout=8.0) as hclient:
+                resp = await hclient.get(f"https://gamma-api.polymarket.com/events?slug={slug}")
+            data = resp.json() if resp.status_code == 200 else []
+            if data and len(data) > 0:
+                for m in data[0].get("markets", []):
+                    if not m.get("closed") and m.get("active"):
+                        outcomes = json.loads(m.get("outcomes", "[]"))
+                        prices   = json.loads(m.get("outcomePrices", "[]"))
+                        yes_idx  = next((i for i, o in enumerate(outcomes) if o.lower() in ("yes","up","above")), -1)
+                        no_idx   = next((i for i, o in enumerate(outcomes) if o.lower() in ("no","down","below")), -1)
+                        if yes_idx != -1 and no_idx != -1 and len(prices) > max(yes_idx, no_idx):
+                            up_val = max(1, min(99, round(float(prices[yes_idx]) * 100)))
+                            dn_val = max(1, min(99, round(float(prices[no_idx])  * 100)))
+                            is_stale = (up_val <= 5 and dn_val >= 94) or (up_val >= 94 and dn_val <= 5)
+                            if not is_stale:
+                                market.up_price   = up_val
+                                market.down_price = dn_val
+                                market.prices_loaded = True
+                            market.current_price = market.up_price
+                            now = time.time()
+                            market.history.append((now, market.up_price))
+                            market.history = [h for h in market.history if now - h[0] <= 300]
+                            print(f"[GAMMA] UP={market.up_price}¢ DOWN={market.down_price}¢")
+                        break
             return
 
         # Use /midpoint for real-time prices (more current than last-trade-price)
