@@ -375,6 +375,7 @@ async def broadcast_state():
                 "strategy_claude": active_strategy_claude,
                 "claude_confidence": claude_strategy.confidence,
                 "claude_phase": claude_strategy.phase,
+                "claude_exit_reason": claude_strategy.exit_reason,
                 "profit_target": global_profit_target if global_profit_target != float('inf') else -1,
                 "strikes": strategy_a_strikes,
                 "b_done": strategy_b_trade_done,
@@ -941,6 +942,11 @@ async def market_loop():
                         realized_profit = revenue - cost_basis
                         portfolio.cycle_profit += realized_profit
                         claude_strategy.cycle_drawdown += min(0, realized_profit)
+
+                        # Log exit reason
+                        exit_reason = claude_strategy.exit_reason or "unknown"
+                        print(f"[CLAUDE] EXIT: {exit_reason} | side={act['side']} | profit=${realized_profit:.2f} | shares={act['shares']}")
+
                         portfolio.history.append({
                             'time': datetime.now().strftime("%H:%M:%S"),
                             'winning_side': f"CLAUDE_{act['side'].upper()}",

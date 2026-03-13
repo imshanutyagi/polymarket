@@ -276,8 +276,20 @@ class ClaudeStrategy:
     EMA_FAST_ALPHA = 2.0 / 11.0   # 10-tick EMA
     EMA_SLOW_ALPHA = 2.0 / 31.0   # 30-tick EMA
     RSI_PERIOD = 14
-    TRAILING_BUFFER = 0.15        # dollars
-    BREAKEVEN_THRESHOLD = 0.50    # dollars
+
+    # Zone-based profit taking
+    ZONE1_MIN = 1.00              # $1.00 — immediate sell threshold
+    ZONE1_MAX = 1.50              # $1.50 — upper bound of danger zone
+    ZONE2_TRAILING_DROP = 0.15    # $0.15 drop from peak triggers sell in Zone 2
+    PANIC_SELL_THRESHOLD = 1.00   # sell instantly if profit crashes below this after peaking above
+
+    # Graduated stop-loss
+    STOPLOSS_AMOUNT = -2.00       # $2.00 stop-loss in last 40 minutes
+    STOPLOSS_GRACE_MINUTES = 20   # no stop-loss for first 20 minutes
+
+    # 10-minute timeout
+    TIMEOUT_MINUTES = 10          # max hold time before taking small profit
+    TIMEOUT_MIN_PROFIT = 0.10     # minimum $0.10 profit to trigger timeout exit
 
     def __init__(self):
         self.held_positions = {'up': 0.0, 'down': 0.0}
@@ -291,12 +303,15 @@ class ClaudeStrategy:
 
         # Strategy state
         self.last_entry_time = 0.0
+        self.position_entry_time = 0.0   # when current position was opened
         self.cycle_drawdown = 0.0
         self.peak_unrealized = 0.0
+        self.profit_ever_hit_target = False  # tracks if profit ever crossed $1.00
         self.confidence = 0
         self.phase = 1
         self.close_only_mode = False
         self.cycle_start_time = 0.0
+        self.exit_reason = ""              # last exit reason for logging
 
     def reset_state(self):
         self.held_positions = {'up': 0.0, 'down': 0.0}
@@ -306,12 +321,15 @@ class ClaudeStrategy:
         self.rsi_prices = []
         self.tick_count = 0
         self.last_entry_time = 0.0
+        self.position_entry_time = 0.0
         self.cycle_drawdown = 0.0
         self.peak_unrealized = 0.0
+        self.profit_ever_hit_target = False
         self.confidence = 0
         self.phase = 1
         self.close_only_mode = False
         self.cycle_start_time = 0.0
+        self.exit_reason = ""
 
     def _update_ema(self, price: float):
         """Update fast and slow exponential moving averages."""
@@ -506,47 +524,70 @@ class ClaudeStrategy:
                         })
                         self.held_positions[side] = 0.0
                         self.held_avg_cost[side] = 0.0
+                self.exit_reason = "time_stop_2min"
+                self.peak_unrealized = 0.0
+                self.profit_ever_hit_target = False
+                self.position_entry_time = 0.0
             return actions
 
-        # === EXIT LOGIC ===
+        # === EXIT LOGIC: 3-Zone Profit System + Graduated Stop-Loss + 10-Min Timeout ===
         if self._has_position():
             unrealized = self._get_unrealized_pnl(up_price, down_price)
             self.peak_unrealized = max(self.peak_unrealized, unrealized)
 
+            # Track if profit ever crossed $1.00
+            if self.peak_unrealized >= self.ZONE1_MIN:
+                self.profit_ever_hit_target = True
+
             should_exit = False
             exit_reason = ""
 
-            # Phase 4: exit everything
+            # Time since position was opened
+            hold_time = now - self.position_entry_time if self.position_entry_time > 0 else 0
+            # Time elapsed in cycle
+            cycle_elapsed = (self.cycle_start_time + 3600 - time_remaining) if self.cycle_start_time > 0 else (3600 - time_remaining)
+            cycle_elapsed_minutes = cycle_elapsed / 60.0
+
+            # --- Phase 4: exit everything (last 5 min) ---
             if self.phase == 4:
                 should_exit = True
                 exit_reason = "phase4_exit"
 
-            # Trailing stop: after $1 profit, sell if drops $0.15 from peak
-            elif self.peak_unrealized >= 1.0 and unrealized <= (self.peak_unrealized - self.TRAILING_BUFFER):
+            # --- ZONE 3: Panic Fallback ---
+            # If profit peaked above $1.00 but crashed below it → panic sell instantly
+            elif self.profit_ever_hit_target and unrealized < self.PANIC_SELL_THRESHOLD and unrealized > 0:
                 should_exit = True
-                exit_reason = "trailing_stop"
+                exit_reason = f"zone3_panic_sell (peaked ${self.peak_unrealized:.2f}, now ${unrealized:.2f})"
 
-            # Breakeven stop: after $0.50 peak, sell if goes negative
-            elif self.peak_unrealized >= self.BREAKEVEN_THRESHOLD and unrealized <= 0.0:
+            # --- ZONE 1: Danger Zone ($1.00 to $1.50) — Immediate Sell ---
+            # A 1-cent drop could cost $0.39+, margin too thin to trail
+            elif self.ZONE1_MIN <= unrealized <= self.ZONE1_MAX:
                 should_exit = True
-                exit_reason = "breakeven_stop"
+                exit_reason = f"zone1_immediate_sell (${unrealized:.2f})"
 
-            # Time-decay take-profit
-            else:
-                if time_remaining > 1800:
-                    target = 1.00
-                elif time_remaining > 900:
-                    target = 0.60
-                elif time_remaining > 300:
-                    target = 0.40
-                else:
-                    target = 0.20
-
-                if unrealized >= target:
+            # --- ZONE 2: Trailing Zone (> $1.50) — Let It Ride ---
+            # Enough buffer to endure small dips, only sell when profit drops $0.15 from peak
+            elif unrealized > self.ZONE1_MAX:
+                if self.peak_unrealized - unrealized >= self.ZONE2_TRAILING_DROP:
                     should_exit = True
-                    exit_reason = "take_profit"
+                    exit_reason = f"zone2_trailing_sell (peak ${self.peak_unrealized:.2f}, now ${unrealized:.2f})"
+                # else: let it ride, don't exit
+
+            # --- Graduated Stop-Loss ---
+            # First 20 minutes: NO stop-loss (BTC is volatile, let it breathe)
+            # Last 40 minutes: $2.00 stop-loss active
+            elif cycle_elapsed_minutes > self.STOPLOSS_GRACE_MINUTES and unrealized <= self.STOPLOSS_AMOUNT:
+                should_exit = True
+                exit_reason = f"graduated_stoploss (${unrealized:.2f}, {cycle_elapsed_minutes:.0f}min elapsed)"
+
+            # --- 10-Minute Timeout Rule ---
+            # If holding > 10 min and profit >= $0.10 but hasn't hit target, cash out
+            elif hold_time >= self.TIMEOUT_MINUTES * 60 and unrealized >= self.TIMEOUT_MIN_PROFIT and unrealized < self.ZONE1_MIN:
+                should_exit = True
+                exit_reason = f"10min_timeout (${unrealized:.2f} after {hold_time/60:.1f}min)"
 
             if should_exit:
+                self.exit_reason = exit_reason
                 for side in ['up', 'down']:
                     if self.held_positions[side] > 0:
                         price = up_price if side == 'up' else down_price
@@ -559,6 +600,8 @@ class ClaudeStrategy:
                         self.held_positions[side] = 0.0
                         self.held_avg_cost[side] = 0.0
                 self.peak_unrealized = 0.0
+                self.profit_ever_hit_target = False
+                self.position_entry_time = 0.0
                 return actions
 
         # === ENTRY LOGIC ===
@@ -674,6 +717,8 @@ class ClaudeStrategy:
             self.held_positions[favored_side] += shares
             self.held_avg_cost[favored_side] = total_cost / self.held_positions[favored_side]
             self.last_entry_time = now
+            self.position_entry_time = now
             self.peak_unrealized = 0.0
+            self.profit_ever_hit_target = False
 
         return actions
