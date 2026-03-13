@@ -400,8 +400,11 @@ async def sync_live_balance():
                     BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=1)
                 )
             data = await asyncio.to_thread(_get_bal)
+            print(f"[LIVE] Balance raw response: {data}")
             bal_raw = data.get("balance", "0") if isinstance(data, dict) else "0"
-            usdc = int(float(bal_raw)) / 1e6
+            raw_float = float(bal_raw)
+            # Polymarket returns balance in USDC units (not micro), just use directly
+            usdc = raw_float if raw_float < 1e9 else raw_float / 1e6
             live_portfolio.balance = usdc
             print(f"[LIVE] Balance synced: ${usdc:.2f}")
         except Exception as e:
