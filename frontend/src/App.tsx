@@ -518,11 +518,9 @@ function App() {
         <div className="flex items-center space-x-4">
           {/* Paper / Live Toggle */}
           <button
+            disabled={!strategies.live_available}
             onClick={() => {
-              if (!strategies.live_available) {
-                alert('Live trading not available. API keys not configured on the server.');
-                return;
-              }
+              if (!strategies.live_available) return;
               if (!strategies.live_mode) {
                 const confirmed = confirm('⚠️ ENABLE LIVE TRADING?\n\nThis will execute REAL trades on Polymarket with REAL money.\n\nAre you absolutely sure?');
                 if (!confirmed) return;
