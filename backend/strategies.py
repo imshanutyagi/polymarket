@@ -406,10 +406,10 @@ class ClaudeStrategy:
         hist_1m = [h for h in history if now - h[0] <= 60]
         if len(hist_1m) >= 3:
             delta = hist_1m[-1][1] - hist_1m[0][1]
-            if delta > 0.5:  # >0.5¢ move in 1 min
+            if delta > 0:  # any upward move in 1 min
                 score += 20
                 direction_votes += 1
-            elif delta < -0.5:
+            elif delta < 0:
                 score += 20
                 direction_votes -= 1
 
@@ -417,27 +417,27 @@ class ClaudeStrategy:
         hist_4m = [h for h in history if now - h[0] <= 240]
         if len(hist_4m) >= 5:
             delta = hist_4m[-1][1] - hist_4m[0][1]
-            if delta > 1.0:  # >1¢ move in 4 min
+            if delta > 0:  # any move in 4 min
                 score += 25
                 direction_votes += 1
-            elif delta < -1.0:
+            elif delta < 0:
                 score += 25
                 direction_votes -= 1
 
         # 5-minute macro trend (full history window)
         if len(history) >= 10:
             delta = history[-1][1] - history[0][1]
-            if delta > 2.0:  # >2¢ move over full window
+            if delta > 1.0:  # >1¢ move over full window
                 score += 25
                 direction_votes += 1
-            elif delta < -2.0:
+            elif delta < -1.0:
                 score += 25
                 direction_votes -= 1
 
         # EMA alignment bonus
         if self.ema_fast is not None and self.ema_slow is not None:
             ema_diff = self.ema_fast - self.ema_slow
-            if abs(ema_diff) > 0.5:
+            if abs(ema_diff) > 0.1:  # any meaningful EMA divergence
                 score += 15
                 if ema_diff > 0:
                     direction_votes += 1
@@ -445,7 +445,7 @@ class ClaudeStrategy:
                     direction_votes -= 1
 
         # Consistency bonus: all indicators agree
-        if abs(direction_votes) >= 3:
+        if abs(direction_votes) >= 2:
             score += 15
 
         # Cap at 100
@@ -461,7 +461,7 @@ class ClaudeStrategy:
     def _get_phase(self, time_left: float, cycle_duration: float) -> int:
         """Determine trading phase based on time remaining."""
         elapsed = cycle_duration - time_left
-        if elapsed < 900:       # First 15 min: observe
+        if elapsed < 300:        # First 5 min: observe (build indicator baselines)
             return 1
         elif time_left > 900:   # >15 min left: active trading
             return 2
@@ -626,20 +626,20 @@ class ClaudeStrategy:
                 return actions
 
             ema_diff = self.ema_fast - self.ema_slow
-            if abs(ema_diff) < 0.3:
+            if abs(ema_diff) < 0.05:
                 # EMAs too close — no clear signal
-                self.confidence = max(0, abs(trend_strength) - 20)
+                self.confidence = max(0, abs(trend_strength) - 10)
                 return actions
 
             favored_side = 'up' if ema_diff > 0 else 'down'
             favored_price = up_price if favored_side == 'up' else down_price
 
-            # === Confluence Check: need 3+ of 5 signals ===
+            # === Confluence Check: need 2+ of 5 signals ===
             signals = 0
 
             # Signal 1: EMA crossover direction
-            if (favored_side == 'up' and ema_diff > 0.5) or \
-               (favored_side == 'down' and ema_diff < -0.5):
+            if (favored_side == 'up' and ema_diff > 0.1) or \
+               (favored_side == 'down' and ema_diff < -0.1):
                 signals += 1
 
             # Signal 2: RSI not overbought/oversold against entry
@@ -649,29 +649,29 @@ class ClaudeStrategy:
                 signals += 1
 
             # Signal 3: Trend strength confirms direction
-            if (favored_side == 'up' and trend_strength > 40) or \
-               (favored_side == 'down' and trend_strength < -40):
+            if (favored_side == 'up' and trend_strength > 15) or \
+               (favored_side == 'down' and trend_strength < -15):
                 signals += 1
 
             # Signal 4: 30s velocity confirms direction
-            if (favored_side == 'up' and vel_30 > 0.05) or \
-               (favored_side == 'down' and vel_30 < -0.05):
+            if (favored_side == 'up' and vel_30 > 0.01) or \
+               (favored_side == 'down' and vel_30 < -0.01):
                 signals += 1
 
             # Signal 5: 60s velocity confirms (macro momentum)
-            if (favored_side == 'up' and vel_60 > 0.02) or \
-               (favored_side == 'down' and vel_60 < -0.02):
+            if (favored_side == 'up' and vel_60 > 0.005) or \
+               (favored_side == 'down' and vel_60 < -0.005):
                 signals += 1
 
             # Compute confidence (0-100) from signal count + indicator strength
             self.confidence = min(100, signals * 20)
-            if abs(trend_strength) > 60:
+            if abs(trend_strength) > 30:
                 self.confidence = min(100, self.confidence + 10)
-            if abs(ema_diff) > 2.0:
+            if abs(ema_diff) > 0.5:
                 self.confidence = min(100, self.confidence + 10)
 
-            # Need at least 3 signals for confluence
-            if signals < 3:
+            # Need at least 2 signals for confluence (lowered from 3)
+            if signals < 2:
                 return actions
 
             # Guard: max entry price
