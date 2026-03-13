@@ -34,19 +34,21 @@ try:
     proxy_address = os.getenv("POLY_PROXY_ADDRESS", "")
     private_key = os.getenv("POLY_PRIVATE_KEY", "")
 
-    if api_key and api_secret and api_passphrase:
+    if private_key and proxy_address:
         clob_client = ClobClient(
             "https://clob.polymarket.com",
-            key=private_key if private_key else None,
+            key=private_key,
             chain_id=POLYGON,
-            signature_type=2 if private_key else None,
-            funder=proxy_address if proxy_address else None
+            signature_type=1,  # POLY_PROXY — standard Polymarket account
+            funder=proxy_address
         )
-        clob_client.set_api_creds(ApiCreds(api_key, api_secret, api_passphrase))
+        # Derive correct CLOB API credentials from private key (ignores Builder keys)
+        creds = clob_client.create_or_derive_api_creds()
+        clob_client.set_api_creds(creds)
         LIVE_TRADING_AVAILABLE = True
-        print("[LIVE] Polymarket CLOB client initialized successfully!")
+        print(f"[LIVE] CLOB credentials derived successfully! key={creds.api_key[:8]}...")
     else:
-        print("[LIVE] API keys not found in .env — Live trading disabled.")
+        print("[LIVE] POLY_PRIVATE_KEY or POLY_PROXY_ADDRESS not set — Live trading disabled.")
 except ImportError:
     print("[LIVE] py-clob-client not installed — Live trading disabled. Run: pip install py-clob-client")
 except Exception as e:
