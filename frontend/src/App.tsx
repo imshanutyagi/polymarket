@@ -75,6 +75,31 @@ function App() {
   const [isTargetEditing, setIsTargetEditing] = useState(false);
   const lastAutoTargetHour = useRef<number>(-1);
 
+  // On page load, immediately connect to the current hourly market
+  useEffect(() => {
+    if (!ws || ws.readyState !== WebSocket.OPEN || activeLiveSlug) return;
+    const connectCurrentMarket = async () => {
+      try {
+        const now = new Date();
+        const options: Intl.DateTimeFormatOptions = { timeZone: 'America/New_York' };
+        const month = now.toLocaleString('en-US', { month: 'long', ...options }).toLowerCase();
+        const day = now.toLocaleString('en-US', { day: 'numeric', ...options });
+        const hour24 = parseInt(now.toLocaleString('en-US', { hour: 'numeric', hourCycle: 'h23', ...options }));
+        const ampm = hour24 >= 12 ? 'pm' : 'am';
+        const hour12 = hour24 % 12 || 12;
+        const currentSlug = `bitcoin-up-or-down-${month}-${day}-${hour12}${ampm}-et`;
+        const res = await fetch(`http://${window.location.hostname}:8000/proxy/gamma/?slug=${currentSlug}&cb=${Date.now()}`);
+        const data = await res.json();
+        if (data && data.length > 0 && !data[0].closed) {
+          setLiveSlugInputValue(currentSlug);
+          ws.send(JSON.stringify({ action: "CONNECT_GAMMA", slug: currentSlug }));
+          setActiveLiveSlug(currentSlug);
+        }
+      } catch (e) {}
+    };
+    connectCurrentMarket();
+  }, [ws, activeLiveSlug]);
+
   // Auto-fetch BTC hourly candle open price from Binance
   useEffect(() => {
     const fetchBtcOpenPrice = async () => {
