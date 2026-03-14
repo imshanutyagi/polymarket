@@ -648,6 +648,14 @@ ai_last_confidence = 0       # 0-100 confidence from AI
 ai_last_signal_time = 0.0    # when signal was last fetched
 AI_SIGNAL_INTERVAL = 30.0    # re-query AI every 30 seconds
 
+# AI Agent state machine
+AI_OBSERVE_SECONDS = 120   # 2-min initial observation
+AI_RESCAN_SECONDS  = 30    # 20-40 sec quick rescan after exit
+ai_agent_state     = "idle"   # idle | observing | holding | rescanning
+ai_observe_start   = 0.0
+ai_rescan_start    = 0.0
+ai_last_query_time = 0.0
+
 def record_stat(strategy_key: str, profit: float):
     if strategy_key in strategy_stats:
         s = strategy_stats[strategy_key]
@@ -809,13 +817,13 @@ async def execute_live_sell(direction: str, shares: float, price_cents: int):
 
 clients: List[WebSocket] = []
 
-async def get_ai_signal() -> str:
+async def get_ai_signal(force: bool = False) -> str:
     """Ask the selected AI model: BUY_UP/BUY_DOWN/WAIT with confidence 0-100."""
     global ai_last_signal, ai_last_confidence, ai_last_signal_time
     if not ai_agent_enabled or not ai_api_key:
         return "WAIT"
     now = time.time()
-    if now - ai_last_signal_time < AI_SIGNAL_INTERVAL:
+    if not force and now - ai_last_signal_time < AI_SIGNAL_INTERVAL:
         return ai_last_signal  # use cached signal
 
     history = market.history[-20:] if market.history else []
@@ -900,6 +908,118 @@ async def get_ai_signal() -> str:
         return ai_last_signal
 
 
+async def ai_direct_buy(direction: str):
+    """AI agent places a direct buy into the active portfolio."""
+    global portfolio
+    price = market.up_price if direction == "up" else market.down_price
+    cost_per_share = price / 100.0
+    if cost_per_share <= 0:
+        return
+    if ai_last_confidence >= 75:
+        max_dollars = 10.0
+    elif ai_last_confidence >= 60:
+        max_dollars = 7.0
+    else:
+        max_dollars = 5.0
+    shares = round(max_dollars / cost_per_share, 2)
+    shares = max(1.0, shares)
+    cost = round(shares * cost_per_share, 4)
+    if portfolio.balance < cost:
+        shares = round(portfolio.balance / cost_per_share, 2)
+        cost = round(shares * cost_per_share, 4)
+    if shares <= 0 or portfolio.balance < cost:
+        print(f"[AI-AGENT] Not enough balance for {direction} buy")
+        return
+    portfolio.balance -= cost
+    portfolio.positions[direction] += shares
+    portfolio.total_spent += cost
+    portfolio.spent[direction] += cost
+    print(f"[AI-AGENT] BUY {direction.upper()} | {shares} shares @ {price}¢ | cost=${cost:.2f} | conf={ai_last_confidence}%")
+    if live_mode_enabled:
+        asyncio.create_task(execute_live_buy(direction, shares, price))
+
+
+async def run_ai_agent():
+    """AI agent state machine: observe → enter → hold → rescan → enter."""
+    global ai_agent_state, ai_observe_start, ai_rescan_start, ai_last_query_time
+
+    while True:
+        try:
+            await asyncio.sleep(5)
+
+            if not ai_agent_enabled or not ai_api_key:
+                ai_agent_state = "idle"
+                continue
+
+            if not market.is_live or not market.prices_loaded:
+                continue
+
+            time_left = market.get_time_left_seconds()
+            if time_left < 300:  # < 5 min left, don't enter new positions
+                continue
+
+            has_position = portfolio.total_spent > 0
+            now = time.time()
+
+            # holding → rescanning: position was closed (profit or stop-loss)
+            if ai_agent_state == "holding" and not has_position:
+                ai_agent_state = "rescanning"
+                ai_rescan_start = now
+                print("[AI-AGENT] Position closed → Quick rescan (20-40 sec)...")
+                continue
+
+            # Start observation if idle
+            if ai_agent_state == "idle":
+                ai_agent_state = "observing"
+                ai_observe_start = now
+                print("[AI-AGENT] Observation phase started (2 min)...")
+                continue
+
+            if ai_agent_state == "observing":
+                elapsed = now - ai_observe_start
+                # Query every 30 sec to warm up signal
+                if now - ai_last_query_time >= 30:
+                    await get_ai_signal(force=True)
+                    ai_last_query_time = now
+
+                if elapsed >= AI_OBSERVE_SECONDS:
+                    signal = await get_ai_signal(force=True)
+                    ai_last_query_time = now
+                    if signal in ("BUY_UP", "BUY_DOWN") and ai_last_confidence >= 55:
+                        direction = "up" if signal == "BUY_UP" else "down"
+                        await ai_direct_buy(direction)
+                        ai_agent_state = "holding"
+                        print(f"[AI-AGENT] Entered {direction.upper()} after 2-min observation (conf={ai_last_confidence}%)")
+                    else:
+                        print(f"[AI-AGENT] Signal={signal} conf={ai_last_confidence}% — retrying in 30s")
+                        ai_observe_start = now - (AI_OBSERVE_SECONDS - 30)
+
+            elif ai_agent_state == "rescanning":
+                elapsed = now - ai_rescan_start
+                # Query every 10 sec during quick rescan
+                if now - ai_last_query_time >= 10:
+                    await get_ai_signal(force=True)
+                    ai_last_query_time = now
+
+                if elapsed >= 20:
+                    signal = await get_ai_signal(force=True)
+                    ai_last_query_time = now
+                    enter = signal in ("BUY_UP", "BUY_DOWN") and ai_last_confidence >= 55
+                    force_entry = elapsed >= 40 and signal in ("BUY_UP", "BUY_DOWN")
+                    if enter or force_entry:
+                        direction = "up" if signal == "BUY_UP" else "down"
+                        await ai_direct_buy(direction)
+                        ai_agent_state = "holding"
+                        print(f"[AI-AGENT] Re-entered {direction.upper()} after quick rescan (conf={ai_last_confidence}%)")
+                    elif elapsed >= 40:
+                        print("[AI-AGENT] No signal after rescan → back to observing (30s)")
+                        ai_agent_state = "observing"
+                        ai_observe_start = now - (AI_OBSERVE_SECONDS - 30)
+
+        except Exception as e:
+            print(f"[AI-AGENT] Error: {e}")
+
+
 async def broadcast_state():
     # calculate live P&L
     up_value = portfolio.positions['up'] * (market.up_price / 100.0)
@@ -961,7 +1081,10 @@ async def broadcast_state():
                 "model": ai_model,
                 "last_signal": ai_last_signal,
                 "confidence": ai_last_confidence,
-                "has_key": bool(ai_api_key)
+                "has_key": bool(ai_api_key),
+                "state": ai_agent_state,
+                "observe_seconds_left": max(0, round(AI_OBSERVE_SECONDS - (time.time() - ai_observe_start))) if ai_agent_state == "observing" else 0,
+                "rescan_seconds_left": max(0, round(AI_RESCAN_SECONDS - (time.time() - ai_rescan_start))) if ai_agent_state == "rescanning" else 0,
             }
         }
     }
@@ -1004,7 +1127,7 @@ async def sync_live_balance():
 async def market_loop():
     global active_strategy_a, active_strategy_b, active_strategy_claude
     global strategy_a_strikes, strategy_b_trade_done, strategy_a_done
-    global cycle_warmup_until
+    global cycle_warmup_until, ai_agent_state
 
     while True:
         global portfolio
@@ -1029,6 +1152,8 @@ async def market_loop():
                 claude_strategy.reset_state(full_reset=True)
                 market.prices_loaded = False  # Force wait for fresh prices on new cycle
                 asyncio.create_task(cancel_all_open_orders())  # Cancel stale GTC/resting orders
+                # Reset AI agent to start fresh observation on new cycle
+                ai_agent_state = "idle"
                 print(f"[CYCLE] New cycle started. Per-strategy guards active (prices_loaded, Claude observation).")
                 
             # Update dynamic pricing
@@ -1546,11 +1671,7 @@ async def market_loop():
                         market.peak_profit = 0.0
                         claude_strategy.reset_state()
 
-                # AI agent: get signal before calling strategy
-                if ai_agent_enabled and ai_api_key:
-                    current_ai_signal = await get_ai_signal()
-                else:
-                    current_ai_signal = None
+
 
                 actions = claude_strategy.on_tick(time_left, market.up_price, market.down_price, portfolio, market.history, portfolio.cycle_profit, global_profit_target)
                 for act in actions:
@@ -1601,15 +1722,11 @@ async def market_loop():
                             asyncio.create_task(execute_live_sell(act["side"], act["shares"], act["price"]))
 
                     elif act["action"] == "limit_buy_fill":
-                        # When AI is ON, it is the sole entry gatekeeper.
-                        # Only allow buy if AI explicitly says BUY_UP or BUY_DOWN for this side.
-                        # WAIT = no trade allowed.
+                        # When AI agent is ON, it places its own buys via run_ai_agent().
+                        # Block ClaudeStrategy buys to prevent double-entry.
                         if ai_agent_enabled:
-                            expected = "BUY_UP" if act["side"] == "up" else "BUY_DOWN"
-                            if current_ai_signal != expected:
-                                claude_strategy.held_positions[act["side"]] -= act["shares"]
-                                print(f"[AI] Blocked {act['side']} entry — AI says {current_ai_signal} ({ai_last_confidence}%)")
-                                continue  # skip this buy
+                            claude_strategy.held_positions[act["side"]] -= act["shares"]
+                            continue  # AI agent handles all entries directly
                         cost = act["shares"] * (act["price"] / 100.0)
                         if portfolio.balance >= cost:
                             portfolio.balance -= cost
@@ -1836,6 +1953,7 @@ async def startup_event():
     asyncio.create_task(auto_discover_market())
     asyncio.create_task(stream_live_prices())
     asyncio.create_task(sync_live_balance())
+    asyncio.create_task(run_ai_agent())
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):

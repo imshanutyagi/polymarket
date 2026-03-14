@@ -68,7 +68,7 @@ function App() {
   const [loginPassword, setLoginPassword] = useState("");
 
   // AI Agent state
-  const [aiAgent, setAiAgent] = useState({enabled: false, model: 'claude', last_signal: 'WAIT', confidence: 0, has_key: false});
+  const [aiAgent, setAiAgent] = useState({enabled: false, model: 'claude', last_signal: 'WAIT', confidence: 0, has_key: false, state: 'idle', observe_seconds_left: 0, rescan_seconds_left: 0});
   const [aiTestResult, setAiTestResult] = useState<{ok: boolean, message: string} | null>(null);
   const [aiTesting, setAiTesting] = useState(false);
 
@@ -1408,6 +1408,25 @@ function App() {
                   )}
                   {aiAgent.enabled && (
                     <div style={{marginTop: '8px'}}>
+                      {/* AI Agent Phase */}
+                      <div style={{marginBottom: '6px', padding: '6px 8px', borderRadius: '6px', background: '#1a202c', border: '1px solid #2d3748'}}>
+                        {aiAgent.state === 'observing' && (
+                          <span style={{fontSize: '11px', color: '#ecc94b', fontWeight: 600}}>
+                            Observing market... {aiAgent.observe_seconds_left > 0 ? `${Math.floor(aiAgent.observe_seconds_left / 60)}:${String(aiAgent.observe_seconds_left % 60).padStart(2,'0')} left` : 'deciding...'}
+                          </span>
+                        )}
+                        {aiAgent.state === 'rescanning' && (
+                          <span style={{fontSize: '11px', color: '#63b3ed', fontWeight: 600}}>
+                            Quick rescan... {aiAgent.rescan_seconds_left > 0 ? `${aiAgent.rescan_seconds_left}s left` : 'deciding...'}
+                          </span>
+                        )}
+                        {aiAgent.state === 'holding' && (
+                          <span style={{fontSize: '11px', color: '#48bb78', fontWeight: 600}}>Holding position</span>
+                        )}
+                        {(aiAgent.state === 'idle' || !aiAgent.state) && (
+                          <span style={{fontSize: '11px', color: '#718096'}}>Waiting for live market...</span>
+                        )}
+                      </div>
                       {/* AI Signal */}
                       <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px'}}>
                         <span style={{fontSize: '11px', color: '#a0aec0'}}>AI Signal</span>
