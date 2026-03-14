@@ -1474,92 +1474,19 @@ async def market_loop():
             await asyncio.sleep(1)
 
 async def stream_live_prices():
-    """Stream real-time price updates from Polymarket CLOB WebSocket (instant, no polling delay)."""
-    CLOB_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-    last_slug = ""
-
+    """Poll CLOB midpoint every second — same source Polymarket UI uses, never shows settlement prices."""
     while True:
         try:
-            up_token   = live_token_ids.get("up", "")
-            down_token = live_token_ids.get("down", "")
-            slug       = market.live_slug
-
-            # Wait until we have a live market with token IDs
-            if not market.is_live or not up_token or not down_token:
+            if not market.is_live:
                 await asyncio.sleep(2)
                 continue
 
-            # If slug changed (new cycle), reconnect the stream
-            if slug != last_slug:
-                last_slug = slug
-
-            print(f"[WS-PRICE] Connecting to CLOB stream for {slug}...")
-            async with websockets.connect(CLOB_WS, ping_interval=20, ping_timeout=10) as ws:
-                # Subscribe to both UP and DOWN token order-book channels
-                await ws.send(json.dumps({
-                    "type": "market",
-                    "assets_ids": [up_token, down_token]
-                }))
-                print(f"[WS-PRICE] Subscribed — UP={up_token[:12]}... DOWN={down_token[:12]}...")
-
-                async for raw in ws:
-                    try:
-                        msg = json.loads(raw)
-                        # Each message is a list of events
-                        events = msg if isinstance(msg, list) else [msg]
-                        for ev in events:
-                            asset_id = ev.get("asset_id", "")
-                            # Extract best mid from bids/asks
-                            bids = ev.get("bids", [])
-                            asks = ev.get("asks", [])
-                            if bids and asks:
-                                best_bid = float(bids[0].get("price", 0))
-                                best_ask = float(asks[0].get("price", 0))
-                                mid = (best_bid + best_ask) / 2
-                            elif ev.get("price"):
-                                mid = float(ev["price"])
-                            else:
-                                continue
-
-                            val = max(1, min(99, round(mid * 100)))
-
-                            # Reject settlement/thin-book prices
-                            if val <= 5 or val >= 95:
-                                continue
-
-                            # Reject any single-tick jump > 35¢ (settlement bleed-through)
-                            if asset_id == up_token and abs(val - market.up_price) > 35:
-                                continue
-                            if asset_id == down_token and abs(val - market.down_price) > 35:
-                                continue
-
-                            if asset_id == up_token:
-                                market.up_price = val
-                                market.prices_loaded = True
-                            elif asset_id == down_token:
-                                market.down_price = val
-                                market.prices_loaded = True
-
-                            market.current_price = market.up_price
-                            now = time.time()
-                            market.history.append((now, market.up_price))
-                            market.history = [h for h in market.history if now - h[0] <= 300]
-
-                        # Disconnect when cycle ends so we reconnect for the new market
-                        if not market.is_live or market.live_slug != last_slug:
-                            break
-
-                    except Exception:
-                        continue
+            await _poll_live_prices()
+            await asyncio.sleep(1)
 
         except Exception as e:
-            print(f"[WS-PRICE] Stream error: {e} — falling back to poll")
-            # Fallback: one HTTP poll so prices don't freeze on WS error
-            try:
-                await _poll_live_prices()
-            except Exception:
-                pass
-            await asyncio.sleep(3)
+            print(f"[PRICE] Poll error: {e}")
+            await asyncio.sleep(2)
 
 
 async def auto_discover_market():
