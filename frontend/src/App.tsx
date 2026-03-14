@@ -117,6 +117,7 @@ function App() {
   const [ws, setWs] = useState<WebSocket | null>(null);
   const [liveSlugInputValue, setLiveSlugInputValue] = useState("");
   const [activeLiveSlug, setActiveLiveSlug] = useState("");
+  const [wsConnected, setWsConnected] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [isAutoPilotEnabled, setIsAutoPilotEnabled] = useState(true);
   const manualTargetRef = useRef<number | null>(null);
@@ -125,7 +126,7 @@ function App() {
 
   // On page load, immediately connect to the current hourly market
   useEffect(() => {
-    if (!ws || ws.readyState !== WebSocket.OPEN || activeLiveSlug) return;
+    if (!ws || !wsConnected || activeLiveSlug) return;
     const connectCurrentMarket = async () => {
       try {
         const now = new Date();
@@ -146,7 +147,7 @@ function App() {
       } catch (e) {}
     };
     connectCurrentMarket();
-  }, [ws, activeLiveSlug]);
+  }, [ws, wsConnected, activeLiveSlug]);
 
   // Auto-fetch BTC hourly candle open price from Binance
   useEffect(() => {
@@ -403,6 +404,8 @@ function App() {
       socket = new WebSocket(`${wsProtocol}//${wsHost}/ws`);
       setWs(socket);
 
+      socket.onopen = () => { setWsConnected(true); };
+
       socket.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
@@ -440,6 +443,7 @@ function App() {
 
       socket.onclose = () => {
         console.log("WebSocket disconnected. Reconnecting in 2s...");
+        setWsConnected(false);
         reconnectTimer = setTimeout(connect, 2000);
       };
 
