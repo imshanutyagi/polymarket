@@ -72,7 +72,7 @@ function App() {
   const [loginPassword, setLoginPassword] = useState("");
 
   // AI Agent state
-  const [aiAgent, setAiAgent] = useState({enabled: false, model: 'claude', last_signal: 'WAIT', confidence: 0, has_key: false, state: 'idle', observe_seconds_left: 0, rescan_seconds_left: 0, block_reason: '', confidence_threshold: 55, max_entry: 70, max_spread: 8, clob_safe_mode: true});
+  const [aiAgent, setAiAgent] = useState({enabled: false, model: 'claude', last_signal: 'WAIT', confidence: 0, has_key: false, state: 'idle', observe_seconds_left: 0, rescan_seconds_left: 0, block_reason: '', confidence_threshold: 55, max_entry: 70, max_spread: 8, clob_safe_mode: true, prompt_mode: 'smart'});
   const [aiTestResult, setAiTestResult] = useState<{ok: boolean, message: string} | null>(null);
   const [aiTesting, setAiTesting] = useState(false);
 
@@ -1255,6 +1255,44 @@ function App() {
                         }} />
                       </div>
                       <div style={{borderTop: '1px solid #2d3748', marginBottom: '10px'}} />
+
+                      {/* AI Prompt Mode */}
+                      <div style={{marginBottom: '10px'}}>
+                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px'}}>
+                          <span style={{fontSize: '11px', fontWeight: 600, color: '#e2e8f0'}}>AI Brain Mode</span>
+                          <span style={{fontSize: '10px', color: aiAgent.prompt_mode === 'smart' ? '#48bb78' : '#ecc94b', fontWeight: 600}}>
+                            {aiAgent.prompt_mode === 'smart' ? '🧠 Smart' : '⚡ Classic'}
+                          </span>
+                        </div>
+                        <div style={{display: 'flex', gap: '6px', marginBottom: '4px'}}>
+                          <button
+                            onClick={() => ws?.send(JSON.stringify({action: 'SET_AI_CONFIG', prompt_mode: 'classic'}))}
+                            style={{
+                              flex: 1, padding: '6px', borderRadius: '8px', border: 'none', cursor: 'pointer',
+                              fontSize: '11px', fontWeight: 600, textAlign: 'left' as const,
+                              background: aiAgent.prompt_mode === 'classic' ? 'rgba(236,201,74,0.2)' : '#2d3748',
+                              color: aiAgent.prompt_mode === 'classic' ? '#ecc94b' : '#718096',
+                              borderLeft: aiAgent.prompt_mode === 'classic' ? '3px solid #ecc94b' : '3px solid transparent'
+                            }}
+                          >
+                            <div>⚡ Classic</div>
+                            <div style={{fontSize: '9px', marginTop: '2px', fontWeight: 400}}>Simple trend + direction. Fast decisions, more trades.</div>
+                          </button>
+                          <button
+                            onClick={() => ws?.send(JSON.stringify({action: 'SET_AI_CONFIG', prompt_mode: 'smart'}))}
+                            style={{
+                              flex: 1, padding: '6px', borderRadius: '8px', border: 'none', cursor: 'pointer',
+                              fontSize: '11px', fontWeight: 600, textAlign: 'left' as const,
+                              background: aiAgent.prompt_mode === 'smart' ? 'rgba(72,187,120,0.2)' : '#2d3748',
+                              color: aiAgent.prompt_mode === 'smart' ? '#48bb78' : '#718096',
+                              borderLeft: aiAgent.prompt_mode === 'smart' ? '3px solid #48bb78' : '3px solid transparent'
+                            }}
+                          >
+                            <div>🧠 Smart</div>
+                            <div style={{fontSize: '9px', marginTop: '2px', fontWeight: 400}}>5-signal checklist. Fewer trades, higher quality.</div>
+                          </button>
+                        </div>
+                      </div>
                       <div style={{marginBottom: '10px'}}>
                         <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px'}}>
                           <span style={{fontSize: '11px', fontWeight: 600, color: '#e2e8f0'}}>Min Confidence</span>

@@ -652,6 +652,7 @@ ai_max_entry = 70             # max token price in cents allowed to enter (user-
 ai_max_spread = 8             # max bid-ask spread in cents allowed to enter (user-adjustable, 0=disabled)
 ai_clob_safe_mode = True      # if CLOB goes down while holding, auto cash-out to protect position
 ai_clob_down_since = 0.0      # timestamp when CLOB first went stale while holding (0 = not tracking)
+ai_prompt_mode = "smart"      # "classic" = simple trend-only prompt | "smart" = full multi-signal prompt
 
 # AI Agent state machine
 AI_OBSERVE_SECONDS = 120   # 2-min initial observation
@@ -702,6 +703,7 @@ def save_settings():
         "ai_max_entry": ai_max_entry,
         "ai_max_spread": ai_max_spread,
         "ai_clob_safe_mode": ai_clob_safe_mode,
+        "ai_prompt_mode": ai_prompt_mode,
     }
     try:
         with open(SETTINGS_FILE, "w") as f:
@@ -714,7 +716,7 @@ def load_settings():
     global active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing
     global active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7
     global active_strategy_cpt, active_strategy_claude, global_profit_target
-    global ai_agent_enabled, ai_model, ai_api_key, ai_confidence_threshold, ai_max_entry, ai_max_spread, ai_clob_safe_mode
+    global ai_agent_enabled, ai_model, ai_api_key, ai_confidence_threshold, ai_max_entry, ai_max_spread, ai_clob_safe_mode, ai_prompt_mode
     try:
         if not os.path.exists(SETTINGS_FILE):
             return
@@ -739,6 +741,7 @@ def load_settings():
         ai_max_entry              = int(data.get("ai_max_entry", 70))
         ai_max_spread             = int(data.get("ai_max_spread", 8))
         ai_clob_safe_mode         = bool(data.get("ai_clob_safe_mode", True))
+        ai_prompt_mode            = data.get("ai_prompt_mode", "smart")
         print(f"[SETTINGS] Loaded — active: {[k for k,v in data.items() if v is True]}")
     except Exception as e:
         print(f"[SETTINGS] Load error: {e}")
@@ -965,44 +968,66 @@ async def get_ai_signal(force: bool = False) -> str:
     else:
         liquidity_signal = "spread unknown"
 
-    prompt = (
-        f"You are a Polymarket scalping bot. Trade BTC Up/Down binary options with HIGH CONVICTION only.\n"
-        f"Your goal: only trade when multiple signals AGREE. If signals conflict → WAIT.\n\n"
-        f"MARKET SNAPSHOT:\n"
-        f"- Time remaining: {time_left_min} minutes\n"
-        f"- UP token price: {market.up_price}¢  (pays $1 if BTC ends ABOVE ${market.price_to_beat:.0f})\n"
-        f"- DOWN token price: {market.down_price}¢  (pays $1 if BTC ends BELOW ${market.price_to_beat:.0f})\n"
-        f"- {btc_vs_target}\n\n"
-        f"PRICE ACTION:\n"
-        f"- Recent UP prices (oldest→newest): {prices_str}\n"
-        f"- Trend direction: {trend_str}\n"
-        f"- Trend consistency: {consistency_str}\n"
-        f"- Price velocity: {velocity_str}\n"
-        f"- Breakeven needed: {breakeven_str}\n\n"
-        f"ORDER BOOK & LIQUIDITY:\n"
-        f"- {ob_pressure}\n"
-        f"- Bid-ask spread: {spread_str} ({liquidity_signal})\n"
-        f"- Ask depth: {ask_liq_str} | Bid depth: {bid_liq_str}\n"
-        f"- 24h volume: {vol_str} USDC\n\n"
-        f"THIS CYCLE SO FAR:\n"
-        f"- Cycle profit: ${portfolio.cycle_profit:+.2f}\n"
-        f"- Recent trades: {trades_str}\n\n"
-        f"RULES:\n"
-        f"- Order size: {size_label} | Stop-loss: {stop_loss_str}\n"
-        f"- Balance: ${bal:.2f} | Min confidence: {ai_confidence_threshold}%\n"
-        f"- Max entry price: {'OFF' if ai_max_entry == 0 else str(ai_max_entry) + '¢'}\n\n"
-        f"DECISION CHECKLIST (all should be true to BUY):\n"
-        f"1. Trend consistency is 'strongly rising/falling' — not choppy\n"
-        f"2. Velocity confirms direction (positive for UP, negative for DOWN)\n"
-        f"3. Order book pressure agrees (more buyers for UP, more sellers for DOWN)\n"
-        f"4. BTC position supports outcome (above target for UP, below for DOWN)\n"
-        f"5. Token price is below max entry and breakeven is reachable in time remaining\n"
-        f"6. If recent trades are losses → raise your bar, be more selective\n"
-        f"→ If 3 or fewer conditions are met → WAIT. Only trade when 4-5 align.\n\n"
-        f"Reply with ONLY: SIGNAL:CONFIDENCE (no explanation)\n"
-        f"SIGNAL = BUY_UP, BUY_DOWN, or WAIT. CONFIDENCE = 0-100.\n"
-        f"Examples: BUY_UP:70  or  BUY_DOWN:65  or  WAIT:20"
-    )
+    if ai_prompt_mode == "classic":
+        prompt = (
+            f"You are a Polymarket scalping bot trading BTC Up/Down binary options.\n\n"
+            f"MARKET SNAPSHOT:\n"
+            f"- Time remaining: {time_left_min} minutes\n"
+            f"- UP token price: {market.up_price}¢  (pays $1 if BTC ends ABOVE ${market.price_to_beat:.0f})\n"
+            f"- DOWN token price: {market.down_price}¢  (pays $1 if BTC ends BELOW ${market.price_to_beat:.0f})\n"
+            f"- {btc_vs_target}\n"
+            f"- UP price trend: {trend_str}\n"
+            f"- Recent UP prices (oldest→newest): {prices_str}\n\n"
+            f"RULES:\n"
+            f"- Order size: {size_label} | Stop-loss: {stop_loss_str}\n"
+            f"- Balance: ${bal:.2f} | Min confidence: {ai_confidence_threshold}%\n"
+            f"- Max entry price: {'OFF' if ai_max_entry == 0 else str(ai_max_entry) + '¢'}\n"
+            f"- BUY_UP if trend rising AND BTC near/above target\n"
+            f"- BUY_DOWN if trend falling AND BTC near/below target\n"
+            f"- WAIT if flat trend or no clear edge\n\n"
+            f"Reply with ONLY: SIGNAL:CONFIDENCE (no explanation)\n"
+            f"SIGNAL = BUY_UP, BUY_DOWN, or WAIT. CONFIDENCE = 0-100.\n"
+            f"Examples: BUY_UP:70  or  BUY_DOWN:65  or  WAIT:20"
+        )
+    else:  # smart
+        prompt = (
+            f"You are a Polymarket scalping bot. Trade BTC Up/Down binary options with HIGH CONVICTION only.\n"
+            f"Your goal: only trade when multiple signals AGREE. If signals conflict → WAIT.\n\n"
+            f"MARKET SNAPSHOT:\n"
+            f"- Time remaining: {time_left_min} minutes\n"
+            f"- UP token price: {market.up_price}¢  (pays $1 if BTC ends ABOVE ${market.price_to_beat:.0f})\n"
+            f"- DOWN token price: {market.down_price}¢  (pays $1 if BTC ends BELOW ${market.price_to_beat:.0f})\n"
+            f"- {btc_vs_target}\n\n"
+            f"PRICE ACTION:\n"
+            f"- Recent UP prices (oldest→newest): {prices_str}\n"
+            f"- Trend direction: {trend_str}\n"
+            f"- Trend consistency: {consistency_str}\n"
+            f"- Price velocity: {velocity_str}\n"
+            f"- Breakeven needed: {breakeven_str}\n\n"
+            f"ORDER BOOK & LIQUIDITY:\n"
+            f"- {ob_pressure}\n"
+            f"- Bid-ask spread: {spread_str} ({liquidity_signal})\n"
+            f"- Ask depth: {ask_liq_str} | Bid depth: {bid_liq_str}\n"
+            f"- 24h volume: {vol_str} USDC\n\n"
+            f"THIS CYCLE SO FAR:\n"
+            f"- Cycle profit: ${portfolio.cycle_profit:+.2f}\n"
+            f"- Recent trades: {trades_str}\n\n"
+            f"RULES:\n"
+            f"- Order size: {size_label} | Stop-loss: {stop_loss_str}\n"
+            f"- Balance: ${bal:.2f} | Min confidence: {ai_confidence_threshold}%\n"
+            f"- Max entry price: {'OFF' if ai_max_entry == 0 else str(ai_max_entry) + '¢'}\n\n"
+            f"DECISION CHECKLIST (need 4-5 to BUY):\n"
+            f"1. Trend consistency is 'strongly rising/falling' — not choppy\n"
+            f"2. Velocity confirms direction (positive for UP, negative for DOWN)\n"
+            f"3. Order book pressure agrees (more buyers for UP, more sellers for DOWN)\n"
+            f"4. BTC position supports outcome (above target for UP, below for DOWN)\n"
+            f"5. Token price is below max entry and breakeven is reachable in time remaining\n"
+            f"6. If recent trades are losses → raise your bar, be more selective\n"
+            f"→ 3 or fewer conditions met → WAIT.\n\n"
+            f"Reply with ONLY: SIGNAL:CONFIDENCE (no explanation)\n"
+            f"SIGNAL = BUY_UP, BUY_DOWN, or WAIT. CONFIDENCE = 0-100.\n"
+            f"Examples: BUY_UP:70  or  BUY_DOWN:65  or  WAIT:20"
+        )
 
     # Map model selection to actual API model IDs
     CLAUDE_MODEL_IDS = {
@@ -1354,6 +1379,7 @@ async def broadcast_state():
                 "max_entry": ai_max_entry,
                 "max_spread": ai_max_spread,
                 "clob_safe_mode": ai_clob_safe_mode,
+                "prompt_mode": ai_prompt_mode,
             }
         }
     }
@@ -2308,7 +2334,7 @@ async def websocket_endpoint(websocket: WebSocket):
             cmd = json.loads(data)
             action = cmd.get("action")
             
-            global portfolio, active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing, active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7, active_strategy_cpt, active_strategy_claude, strategy_a_strikes, global_profit_target, live_mode_enabled, live_token_ids, strategy_stats, ai_agent_enabled, ai_model, ai_api_key, ai_last_signal, ai_last_confidence, ai_last_signal_time, clob_last_update_time, ai_confidence_threshold, ai_max_entry, ai_max_spread, ai_clob_safe_mode
+            global portfolio, active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing, active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7, active_strategy_cpt, active_strategy_claude, strategy_a_strikes, global_profit_target, live_mode_enabled, live_token_ids, strategy_stats, ai_agent_enabled, ai_model, ai_api_key, ai_last_signal, ai_last_confidence, ai_last_signal_time, clob_last_update_time, ai_confidence_threshold, ai_max_entry, ai_max_spread, ai_clob_safe_mode, ai_prompt_mode
             current_portfolio = live_portfolio if live_mode_enabled else paper_portfolio
             portfolio = current_portfolio
             if action == "BUY_UP":
@@ -2465,6 +2491,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     ai_max_spread = max(0, min(20, int(cmd["max_spread"])))
                 if "clob_safe_mode" in cmd:
                     ai_clob_safe_mode = bool(cmd["clob_safe_mode"])
+                if "prompt_mode" in cmd:
+                    ai_prompt_mode = cmd["prompt_mode"] if cmd["prompt_mode"] in ("classic", "smart") else "smart"
                 save_settings()
             elif action == "TEST_AI":
                 # Force a fresh AI call and send back the result immediately
