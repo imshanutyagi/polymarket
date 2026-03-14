@@ -1027,9 +1027,11 @@ async def ai_direct_buy(direction: str) -> bool:
         ai_block_reason = f"Wide spread ({market_spread_cents}¢) — illiquid, skip entry"
         print(f"[AI-AGENT] Blocked: {ai_block_reason}")
         return False
-    # Note: global cycle profit target intentionally NOT applied to AI agent.
-    # The AI manages its own risk via confidence threshold, stop-losses, and order sizing.
-    # The $4 cap was designed for dumb EMA strategies — AI doesn't need it.
+    # Hard stop 4: cycle profit target hit — stop trading this cycle
+    if portfolio.cycle_profit >= global_profit_target:
+        ai_block_reason = f"Cycle profit target ${global_profit_target:.2f} reached"
+        print(f"[AI-AGENT] Blocked: {ai_block_reason} (profit=${portfolio.cycle_profit:.2f})")
+        return False
     # Time-based order size + trading cutoff
     time_left_min = market.get_time_left_seconds() / 60
     if time_left_min <= 5:
