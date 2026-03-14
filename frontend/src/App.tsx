@@ -61,6 +61,45 @@ function App() {
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Line"> | null>(null);
 
+  // Auth state
+  const [authed, setAuthed] = useState(false);
+  const [loginError, setLoginError] = useState("");
+  const [loginUsername, setLoginUsername] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+
+  // AI Agent state
+  const [aiAgent, setAiAgent] = useState({enabled: false, model: 'claude', last_signal: 'WAIT', has_key: false});
+
+  // On mount: verify stored token
+  useEffect(() => {
+    const token = localStorage.getItem('bot_token') || '';
+    if (!token) return;
+    fetch(`/api/verify?token=${token}`)
+      .then(r => r.json())
+      .then(data => { if (data.valid) setAuthed(true); })
+      .catch(() => {});
+  }, []);
+
+  const handleLogin = async () => {
+    try {
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({username: loginUsername, password: loginPassword})
+      });
+      if (res.ok) {
+        const data = await res.json();
+        localStorage.setItem('bot_token', data.token);
+        setAuthed(true);
+        setLoginError("");
+      } else {
+        setLoginError("Invalid credentials");
+      }
+    } catch {
+      setLoginError("Connection error");
+    }
+  };
+
   const [market, setMarket] = useState<MarketData>({
     current_price: 0, price_to_beat: 0, time_left: 0, cycle_duration: 3600, volatility: 0.010, up_price: 50, down_price: 50
   });
@@ -370,6 +409,7 @@ function App() {
             setPortfolio(msg.data.portfolio);
             setStrategies(msg.data.strategies);
             if (msg.data.strategy_stats) setStrategyStats(msg.data.strategy_stats);
+            if (msg.data.ai_agent) setAiAgent(msg.data.ai_agent);
 
             if (msg.data.market?.is_live && msg.data.market?.live_slug) {
                 setActiveLiveSlug((prev) => prev === "" ? msg.data.market.live_slug : prev);
@@ -498,6 +538,38 @@ function App() {
       setMarket(prev => ({ ...prev, volatility: value }));
     }
   };
+
+  if (!authed) {
+    return (
+      <div style={{minHeight: '100vh', background: '#111827', display: 'flex', alignItems: 'center', justifyContent: 'center'}}>
+        <div style={{background: '#1f2937', border: '1px solid #374151', borderRadius: '16px', padding: '40px', width: '360px', boxShadow: '0 20px 60px rgba(0,0,0,0.5)'}}>
+          <h1 style={{textAlign: 'center', fontSize: '22px', fontWeight: 700, color: '#e2e8f0', marginBottom: '8px'}}>Polymarket Bot</h1>
+          <p style={{textAlign: 'center', fontSize: '13px', color: '#6b7280', marginBottom: '28px'}}>Sign in to continue</p>
+          <input
+            type="text"
+            placeholder="Username"
+            value={loginUsername}
+            onChange={e => setLoginUsername(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleLogin()}
+            style={{width: '100%', padding: '10px 14px', background: '#111827', color: 'white', border: '1px solid #374151', borderRadius: '8px', fontSize: '14px', marginBottom: '12px', boxSizing: 'border-box'}}
+          />
+          <input
+            type="password"
+            placeholder="Password"
+            value={loginPassword}
+            onChange={e => setLoginPassword(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleLogin()}
+            style={{width: '100%', padding: '10px 14px', background: '#111827', color: 'white', border: '1px solid #374151', borderRadius: '8px', fontSize: '14px', marginBottom: '16px', boxSizing: 'border-box'}}
+          />
+          {loginError && <p style={{color: '#fc8181', fontSize: '13px', marginBottom: '12px', textAlign: 'center'}}>{loginError}</p>}
+          <button
+            onClick={handleLogin}
+            style={{width: '100%', padding: '11px', background: '#4f46e5', color: 'white', border: 'none', borderRadius: '8px', fontSize: '15px', fontWeight: 600, cursor: 'pointer'}}
+          >Login</button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 font-sans selection:bg-blue-500/30 p-6">
@@ -1268,6 +1340,49 @@ function App() {
                   {strategies.claude_exit_reason && (
                     <div className="text-xs px-3 py-1 rounded-lg bg-gray-900 text-violet-400 font-mono">
                       Last exit: {strategies.claude_exit_reason}
+                    </div>
+                  )}
+                </div>
+              )}
+              {strategies.strategy_claude && (
+                <div style={{marginTop: '12px', padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px'}} onClick={e => e.stopPropagation()}>
+                  <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px'}}>
+                    <span style={{fontSize: '12px', fontWeight: 600, color: '#a0aec0'}}>🤖 AI AGENT</span>
+                    <button
+                      onClick={() => ws?.send(JSON.stringify({action: 'TOGGLE_AI_AGENT'}))}
+                      style={{
+                        padding: '3px 10px', borderRadius: '12px', border: 'none', cursor: 'pointer', fontSize: '11px', fontWeight: 600,
+                        background: aiAgent.enabled ? '#48bb78' : '#4a5568',
+                        color: 'white'
+                      }}
+                    >{aiAgent.enabled ? 'ON' : 'OFF'}</button>
+                  </div>
+                  <select
+                    value={aiAgent.model}
+                    onChange={e => ws?.send(JSON.stringify({action: 'SET_AI_CONFIG', model: e.target.value}))}
+                    style={{width: '100%', marginBottom: '6px', padding: '4px', background: '#2d3748', color: 'white', border: '1px solid #4a5568', borderRadius: '4px', fontSize: '12px'}}
+                  >
+                    <option value="claude">Claude Haiku (Anthropic)</option>
+                    <option value="gemini">Gemini Flash (Google)</option>
+                  </select>
+                  <div style={{display: 'flex', gap: '4px'}}>
+                    <input
+                      type="password"
+                      placeholder={aiAgent.has_key ? "API key saved ✓" : "Enter API key..."}
+                      id="ai-key-input"
+                      style={{flex: 1, padding: '4px 8px', background: '#2d3748', color: 'white', border: '1px solid #4a5568', borderRadius: '4px', fontSize: '11px'}}
+                    />
+                    <button
+                      onClick={() => {
+                        const key = (document.getElementById('ai-key-input') as HTMLInputElement)?.value;
+                        if (key) ws?.send(JSON.stringify({action: 'SET_AI_CONFIG', api_key: key}));
+                      }}
+                      style={{padding: '4px 8px', background: '#4299e1', color: 'white', border: 'none', borderRadius: '4px', fontSize: '11px', cursor: 'pointer'}}
+                    >Save</button>
+                  </div>
+                  {aiAgent.enabled && aiAgent.last_signal !== 'WAIT' && (
+                    <div style={{marginTop: '6px', fontSize: '11px', color: aiAgent.last_signal === 'BUY_UP' ? '#48bb78' : '#fc8181'}}>
+                      AI Signal: {aiAgent.last_signal}
                     </div>
                   )}
                 </div>

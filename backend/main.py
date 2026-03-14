@@ -4,10 +4,11 @@ import math
 import os
 import time
 import traceback
+import uuid
 from datetime import datetime
 import httpx
 import websockets
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -21,6 +22,11 @@ import os
 # Ensure it always finds the .env file exactly where main.py is, regardless of where uvicorn is launched
 dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 load_dotenv(dotenv_path)
+
+# --- Web Login Credentials ---
+WEB_USERNAME = os.getenv("WEB_USERNAME", "admin")
+WEB_PASSWORD = os.getenv("WEB_PASSWORD", "poly2024")
+VALID_TOKENS: set = set()
 
 LIVE_TRADING_AVAILABLE = False
 clob_client = None
@@ -103,6 +109,20 @@ async def proxy_gamma(slug: str):
             return resp.json()
     except Exception as e:
         return []
+
+
+@app.post("/api/login")
+async def login(body: dict):
+    if body.get("username") == WEB_USERNAME and body.get("password") == WEB_PASSWORD:
+        token = str(uuid.uuid4())
+        VALID_TOKENS.add(token)
+        return {"token": token, "ok": True}
+    raise HTTPException(status_code=401, detail="Invalid credentials")
+
+
+@app.get("/api/verify")
+async def verify_token(token: str = ""):
+    return {"valid": token in VALID_TOKENS}
 
 
 @app.post("/api/backtest")
@@ -619,6 +639,14 @@ _stat_keys = ["strategy_a","strategy_b","strategy_c","strategy_c_trailing",
                "strategy_d","strategy_e","strategy_f","strategy_7","strategy_cpt","strategy_claude"]
 strategy_stats = {k: {"trades":0,"wins":0,"total_profit":0.0,"best":0.0,"worst":0.0} for k in _stat_keys}
 
+# AI Agent globals
+ai_agent_enabled = False
+ai_model = "claude"   # "claude" or "gemini"
+ai_api_key = ""
+ai_last_signal = "WAIT"   # last signal from AI
+ai_last_signal_time = 0.0  # when signal was last fetched
+AI_SIGNAL_INTERVAL = 30.0  # re-query AI every 30 seconds
+
 def record_stat(strategy_key: str, profit: float):
     if strategy_key in strategy_stats:
         s = strategy_stats[strategy_key]
@@ -650,6 +678,9 @@ def save_settings():
         "active_strategy_cpt": active_strategy_cpt,
         "active_strategy_claude": active_strategy_claude,
         "global_profit_target": global_profit_target if global_profit_target != float('inf') else -1,
+        "ai_agent_enabled": ai_agent_enabled,
+        "ai_model": ai_model,
+        "ai_api_key": ai_api_key,
     }
     try:
         with open(SETTINGS_FILE, "w") as f:
@@ -662,6 +693,7 @@ def load_settings():
     global active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing
     global active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7
     global active_strategy_cpt, active_strategy_claude, global_profit_target
+    global ai_agent_enabled, ai_model, ai_api_key
     try:
         if not os.path.exists(SETTINGS_FILE):
             return
@@ -679,6 +711,9 @@ def load_settings():
         active_strategy_claude    = data.get("active_strategy_claude", False)
         pt = data.get("global_profit_target", 4.0)
         global_profit_target      = float('inf') if pt == -1 else float(pt)
+        ai_agent_enabled          = data.get("ai_agent_enabled", False)
+        ai_model                  = data.get("ai_model", "claude")
+        ai_api_key                = data.get("ai_api_key", "")
         print(f"[SETTINGS] Loaded — active: {[k for k,v in data.items() if v is True]}")
     except Exception as e:
         print(f"[SETTINGS] Load error: {e}")
@@ -773,6 +808,68 @@ async def execute_live_sell(direction: str, shares: float, price_cents: int):
 
 clients: List[WebSocket] = []
 
+async def get_ai_signal() -> str:
+    """Ask the selected AI model: BUY_UP, BUY_DOWN, or WAIT."""
+    global ai_last_signal, ai_last_signal_time
+    if not ai_agent_enabled or not ai_api_key:
+        return "WAIT"
+    now = time.time()
+    if now - ai_last_signal_time < AI_SIGNAL_INTERVAL:
+        return ai_last_signal  # use cached signal
+
+    # Build price history summary
+    history = market.history[-20:] if market.history else []
+    prices_str = ", ".join([f"{int(p[1])}¢" for p in history[-10:]]) if history else "no data"
+    time_left_min = int(market.get_time_left_seconds() / 60)
+
+    prompt = (
+        f"You are a Polymarket trading assistant. Analyze this Bitcoin Up/Down market:\n"
+        f"Time remaining: {time_left_min} minutes\n"
+        f"UP price: {market.up_price}¢ (probability BTC ends ABOVE target)\n"
+        f"DOWN price: {market.down_price}¢ (probability BTC ends BELOW target)\n"
+        f"Target price to beat: ${market.price_to_beat:.2f}\n"
+        f"Recent UP price trend (last 10 ticks): {prices_str}\n\n"
+        f"Should I enter a trade now? Consider: price momentum, time remaining, odds value.\n"
+        f"Reply with ONLY one word: BUY_UP, BUY_DOWN, or WAIT"
+    )
+
+    try:
+        if ai_model == "claude":
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={"x-api-key": ai_api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                    json={"model": "claude-haiku-4-5-20251001", "max_tokens": 10,
+                          "messages": [{"role": "user", "content": prompt}]}
+                )
+                data = resp.json()
+                text = data.get("content", [{}])[0].get("text", "WAIT").strip().upper()
+        else:  # gemini
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={ai_api_key}",
+                    json={"contents": [{"parts": [{"text": prompt}]}],
+                          "generationConfig": {"maxOutputTokens": 10}}
+                )
+                data = resp.json()
+                text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "WAIT").strip().upper()
+
+        if "BUY_UP" in text:
+            signal = "BUY_UP"
+        elif "BUY_DOWN" in text:
+            signal = "BUY_DOWN"
+        else:
+            signal = "WAIT"
+
+        ai_last_signal = signal
+        ai_last_signal_time = now
+        print(f"[AI] Signal: {signal} (model={ai_model})")
+        return signal
+    except Exception as e:
+        print(f"[AI] Error: {e}")
+        return ai_last_signal  # keep last signal on error
+
+
 async def broadcast_state():
     # calculate live P&L
     up_value = portfolio.positions['up'] * (market.up_price / 100.0)
@@ -828,7 +925,13 @@ async def broadcast_state():
                 "live_mode": live_mode_enabled,
                 "live_available": LIVE_TRADING_AVAILABLE
             },
-            "strategy_stats": strategy_stats
+            "strategy_stats": strategy_stats,
+            "ai_agent": {
+                "enabled": ai_agent_enabled,
+                "model": ai_model,
+                "last_signal": ai_last_signal,
+                "has_key": bool(ai_api_key)
+            }
         }
     }
     msg_str = json.dumps(state_msg)
@@ -1410,6 +1513,12 @@ async def market_loop():
                         market.peak_profit = 0.0
                         claude_strategy.reset_state()
 
+                # AI agent: get signal before calling strategy
+                if ai_agent_enabled and ai_api_key:
+                    current_ai_signal = await get_ai_signal()
+                else:
+                    current_ai_signal = None
+
                 actions = claude_strategy.on_tick(time_left, market.up_price, market.down_price, portfolio, market.history, portfolio.cycle_profit, global_profit_target)
                 for act in actions:
                     if act["action"] in ["market_sell", "limit_sell_fill"]:
@@ -1459,6 +1568,13 @@ async def market_loop():
                             asyncio.create_task(execute_live_sell(act["side"], act["shares"], act["price"]))
 
                     elif act["action"] == "limit_buy_fill":
+                        # If AI agent enabled, only allow buy if AI signal matches the side
+                        if ai_agent_enabled and current_ai_signal:
+                            expected = "BUY_UP" if act["side"] == "up" else "BUY_DOWN"
+                            if current_ai_signal != expected:
+                                claude_strategy.held_positions[act["side"]] -= act["shares"]
+                                print(f"[AI] Blocked {act['side']} entry — AI says {current_ai_signal}")
+                                continue  # skip this buy
                         cost = act["shares"] * (act["price"] / 100.0)
                         if portfolio.balance >= cost:
                             portfolio.balance -= cost
@@ -1694,7 +1810,7 @@ async def websocket_endpoint(websocket: WebSocket):
             cmd = json.loads(data)
             action = cmd.get("action")
             
-            global portfolio, active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing, active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7, active_strategy_cpt, active_strategy_claude, strategy_a_strikes, global_profit_target, live_mode_enabled, live_token_ids, strategy_stats
+            global portfolio, active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing, active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7, active_strategy_cpt, active_strategy_claude, strategy_a_strikes, global_profit_target, live_mode_enabled, live_token_ids, strategy_stats, ai_agent_enabled, ai_model, ai_api_key, ai_last_signal, ai_last_signal_time
             current_portfolio = live_portfolio if live_mode_enabled else paper_portfolio
             portfolio = current_portfolio
             if action == "BUY_UP":
@@ -1830,6 +1946,15 @@ async def websocket_endpoint(websocket: WebSocket):
                     market.peak_profit = 0.0
                     claude_strategy.reset_state(full_reset=True)
                     active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = active_strategy_cpt = False
+                save_settings()
+            elif action == "TOGGLE_AI_AGENT":
+                ai_agent_enabled = not ai_agent_enabled
+                save_settings()
+            elif action == "SET_AI_CONFIG":
+                ai_model = cmd.get("model", ai_model)
+                key = cmd.get("api_key", "")
+                if key:
+                    ai_api_key = key
                 save_settings()
             elif action == "TOGGLE_LIVE_MODE":
                 if LIVE_TRADING_AVAILABLE:
