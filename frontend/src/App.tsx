@@ -153,7 +153,7 @@ function App() {
     connectCurrentMarket();
   }, [ws, wsConnected, activeLiveSlug]);
 
-  // Auto-fetch BTC hourly candle open price from Binance
+  // Auto-fetch BTC hourly candle open price from Binance (fallback only)
   useEffect(() => {
     const fetchBtcOpenPrice = async () => {
       const currentHour = new Date().getUTCHours();
@@ -165,7 +165,8 @@ function App() {
           const openPrice = parseFloat(data[0][1]);
           manualTargetRef.current = openPrice;
           lastAutoTargetHour.current = currentHour;
-          setMarket(prev => ({ ...prev, price_to_beat: openPrice }));
+          // Only apply if backend hasn't already set a price from Polymarket
+          setMarket(prev => prev.price_to_beat > 0 ? prev : { ...prev, price_to_beat: openPrice });
           if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ action: "SYNC_LIVE_GAMMA", target_price: openPrice }));
           }

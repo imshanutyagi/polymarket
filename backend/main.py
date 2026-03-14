@@ -1895,6 +1895,18 @@ async def auto_discover_market():
                                         with open("tokens.json", "w") as f:
                                             json.dump([live_token_ids["up"], live_token_ids["down"]], f)
 
+                                    # Extract target price (price to beat) from market question
+                                    # Polymarket embeds it as "$XX,XXX.XX" in the question text
+                                    import re as _re
+                                    question_text = m.get("question", "") or m.get("description", "") or event.get("title", "")
+                                    price_match = _re.search(r'\$([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?)', question_text)
+                                    if price_match:
+                                        target_str = price_match.group(1).replace(",", "")
+                                        target_price = float(target_str)
+                                        if target_price > 1000:  # sanity check — must be a BTC price
+                                            market.price_to_beat = target_price
+                                            print(f"[AUTO] Target price from Polymarket: ${target_price:,.2f}")
+
                                     # Calculate time remaining (until next hour boundary)
                                     next_hour = (now_secs // 3600 + 1) * 3600
                                     time_remaining = next_hour - now_secs
