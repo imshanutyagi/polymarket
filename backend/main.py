@@ -656,6 +656,7 @@ ai_observe_start   = 0.0
 ai_rescan_start    = 0.0
 ai_last_query_time = 0.0
 ai_block_reason    = ""    # Human-readable reason why last buy was blocked (shown in UI)
+position_entry_time = 0.0  # When the current portfolio position was first opened this cycle
 
 def record_stat(strategy_key: str, profit: float):
     if strategy_key in strategy_stats:
@@ -933,7 +934,7 @@ async def get_ai_signal(force: bool = False) -> str:
 
 async def ai_direct_buy(direction: str) -> bool:
     """AI agent places a direct buy. AI decides timing/price — we only enforce 3 hard stops."""
-    global portfolio, ai_block_reason
+    global portfolio, ai_block_reason, position_entry_time
     # Hard stop 1: no CLOB price yet — would trade on fake Gamma 50/50 prices
     if clob_last_update_time == 0.0:
         ai_block_reason = "Waiting for CLOB price confirmation"
@@ -971,6 +972,7 @@ async def ai_direct_buy(direction: str) -> bool:
     portfolio.positions[direction] += shares
     portfolio.total_spent += cost
     portfolio.spent[direction] += cost
+    position_entry_time = time.time()  # Record when position was opened (for hold-in-loss rule)
     print(f"[AI-AGENT] BUY {direction.upper()} | {shares} shares @ {price}¢ | cost=${cost:.2f} | conf={ai_last_confidence}%")
     if live_mode_enabled:
         asyncio.create_task(execute_live_buy(direction, shares, price))
@@ -1009,6 +1011,12 @@ async def run_ai_agent():
             # Stop scanning once cycle profit target is reached
             if portfolio.cycle_profit >= global_profit_target:
                 await asyncio.sleep(10)
+                continue
+
+            # Wait 1 minute into new cycle before starting observation (let prices settle)
+            time_into_cycle = now - market.cycle_start_time
+            if time_into_cycle < 60:
+                ai_block_reason = f"New cycle — analyzing for {max(0, 60 - int(time_into_cycle))}s before first entry"
                 continue
 
             # Start observation if idle
@@ -1168,7 +1176,7 @@ async def sync_live_balance():
 async def market_loop():
     global active_strategy_a, active_strategy_b, active_strategy_claude
     global strategy_a_strikes, strategy_b_trade_done, strategy_a_done
-    global cycle_warmup_until, ai_agent_state, clob_last_update_time
+    global cycle_warmup_until, ai_agent_state, clob_last_update_time, position_entry_time
 
     while True:
         global portfolio
@@ -1192,6 +1200,7 @@ async def market_loop():
                 claude_strategy.reset_state(full_reset=True)
                 market.prices_loaded = False
                 clob_last_update_time = 0.0
+                position_entry_time = 0.0
                 asyncio.create_task(cancel_all_open_orders())
                 ai_agent_state = "idle"
 
@@ -1217,7 +1226,14 @@ async def market_loop():
                 down_val = portfolio.positions['down'] * (market.down_price / 100.0)
                 live_profit = (up_val + down_val) - sunk
                 
-                if active_strategy_c_trailing or active_strategy_cpt or active_strategy_claude:
+                # Hold-in-loss rule: if position entered in first 20 min and still at a loss,
+                # don't exit — give it the remaining time to recover to +$1
+                entered_in_first_20 = (position_entry_time > 0 and
+                                       position_entry_time - market.cycle_start_time < 1200)
+                if entered_in_first_20 and live_profit < 0:
+                    # Stay in position — wait for +$1 recovery
+                    pass
+                elif active_strategy_c_trailing or active_strategy_cpt or active_strategy_claude:
                     # Time-Decaying Profit Target
                     if time_left <= 300:        # last 5 min
                         dynamic_target = 0.50
