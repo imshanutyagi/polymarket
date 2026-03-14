@@ -1226,12 +1226,13 @@ async def market_loop():
                 down_val = portfolio.positions['down'] * (market.down_price / 100.0)
                 live_profit = (up_val + down_val) - sunk
                 
-                # Hold-in-loss rule: if position entered in first 20 min and still at a loss,
-                # don't exit — give it the remaining time to recover to +$1
+                # Hold-in-loss rule: if position entered in first 20 min and loss is small (< $1.50),
+                # hold — likely just noise with 40+ min to recover.
+                # If loss > $1.50 → exit normally to prevent total wipeout.
                 entered_in_first_20 = (position_entry_time > 0 and
                                        position_entry_time - market.cycle_start_time < 1200)
-                if entered_in_first_20 and live_profit < 0:
-                    # Stay in position — wait for +$1 recovery
+                if entered_in_first_20 and -1.50 < live_profit < 0:
+                    # Small loss, plenty of time — hold for recovery
                     pass
                 elif active_strategy_c_trailing or active_strategy_cpt or active_strategy_claude:
                     # Time-Decaying Profit Target
