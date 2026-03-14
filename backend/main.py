@@ -1375,10 +1375,10 @@ async def market_loop():
                         market.peak_profit = 0.0
                         claude_strategy.reset_state()
 
-                    # Hard absolute stop: -$6 on ANY position regardless of entry time.
+                    # Hard absolute stop: -$3 on ANY position regardless of entry time.
                     # Prevents early entries from bleeding the whole cycle.
-                    elif claude_live_pnl <= -6.0:
-                        print(f"[CLAUDE] HARD STOP -$6 (entry_tl protection): ${claude_live_pnl:.2f}, cutting loss")
+                    elif claude_live_pnl <= -3.0:
+                        print(f"[CLAUDE] HARD STOP -$3 (entry_tl protection): ${claude_live_pnl:.2f}, cutting loss")
                         record_stat("strategy_claude", claude_live_pnl)
                         portfolio.cash_out(market.up_price, market.down_price)
                         market.peak_profit = 0.0
