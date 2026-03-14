@@ -1631,14 +1631,17 @@ async def _poll_live_prices():
         up_data = up_resp.json() if up_resp.status_code == 200 else {}
         dn_data = dn_resp.json() if dn_resp.status_code == 200 else {}
 
-        if up_data.get("price"):
-            up_val = max(1, min(99, round(float(up_data["price"]) * 100)))
-            dn_val = max(1, min(99, round(float(dn_data["price"]) * 100))) if dn_data.get("price") else market.down_price
+        # CLOB /midpoint returns {"mid": "0.41"}, not "price"
+        up_raw = up_data.get("mid") or up_data.get("price")
+        dn_raw = dn_data.get("mid") or dn_data.get("price")
+        if up_raw:
+            up_val = max(1, min(99, round(float(up_raw) * 100)))
+            dn_val = max(1, min(99, round(float(dn_raw) * 100))) if dn_raw else market.down_price
             # Reject stale/thin-book prices: expired or illiquid new market
             is_stale = (up_val <= 5 and dn_val >= 94) or (up_val >= 94 and dn_val <= 5)
             if not is_stale:
                 market.up_price = up_val
-                if dn_data.get("price"):
+                if dn_raw:
                     market.down_price = dn_val
                 market.prices_loaded = True
 
