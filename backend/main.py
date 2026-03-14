@@ -933,10 +933,9 @@ async def get_ai_signal(force: bool = False) -> str:
 async def ai_direct_buy(direction: str) -> bool:
     """AI agent places a direct buy into the active portfolio. Returns True if order was placed."""
     global portfolio
-    # Require fresh CLOB prices — don't trade on stale/Gamma prices
-    clob_age = time.time() - clob_last_update_time
-    if clob_last_update_time == 0.0 or clob_age > 30:
-        print(f"[AI-AGENT] Blocked: CLOB prices not fresh (last update {clob_age:.0f}s ago) — waiting for real prices")
+    # Require at least one confirmed CLOB price — blocks trading on Gamma mid-prices (50/50)
+    if clob_last_update_time == 0.0:
+        print(f"[AI-AGENT] Blocked: no CLOB price confirmed yet — waiting for real order book prices")
         return False
     # Respect the cycle profit target — stop trading once it's hit
     if portfolio.cycle_profit >= global_profit_target:
