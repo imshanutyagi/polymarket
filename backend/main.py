@@ -936,7 +936,24 @@ async def ai_direct_buy(direction: str):
     if portfolio.cycle_profit >= global_profit_target:
         print(f"[AI-AGENT] Cycle target ${global_profit_target:.2f} reached (profit=${portfolio.cycle_profit:.2f}) — no new entries")
         return
+    # Enforce time-based price limits in code (not just prompt)
+    time_left_secs = market.get_time_left_seconds()
+    time_left_min = time_left_secs / 60
+    if time_left_min <= 10:
+        print(f"[AI-AGENT] Blocked: only {time_left_min:.1f} min left — no entries in last 10 min")
+        return
+    if time_left_min > 45:
+        max_entry = 78
+    elif time_left_min > 30:
+        max_entry = 72
+    elif time_left_min > 15:
+        max_entry = 65
+    else:
+        max_entry = 55
     price = market.up_price if direction == "up" else market.down_price
+    if price > max_entry:
+        print(f"[AI-AGENT] Blocked: {direction} price {price}¢ > max {max_entry}¢ for {time_left_min:.0f} min remaining")
+        return
     cost_per_share = price / 100.0
     if cost_per_share <= 0:
         return
@@ -980,7 +997,7 @@ async def run_ai_agent():
                 continue
 
             time_left = market.get_time_left_seconds()
-            if time_left < 300:  # < 5 min left, don't enter new positions
+            if time_left < 600:  # < 10 min left, don't enter new positions
                 continue
 
             # Stop scanning once cycle profit target is reached
