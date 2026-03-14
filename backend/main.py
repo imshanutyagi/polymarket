@@ -932,38 +932,20 @@ async def get_ai_signal(force: bool = False) -> str:
 
 
 async def ai_direct_buy(direction: str) -> bool:
-    """AI agent places a direct buy into the active portfolio. Returns True if order was placed."""
+    """AI agent places a direct buy. AI decides timing/price — we only enforce 3 hard stops."""
     global portfolio, ai_block_reason
-    # Require at least one confirmed CLOB price — blocks trading on Gamma mid-prices (50/50)
+    # Hard stop 1: no CLOB price yet — would trade on fake Gamma 50/50 prices
     if clob_last_update_time == 0.0:
         ai_block_reason = "Waiting for CLOB price confirmation"
         print(f"[AI-AGENT] Blocked: {ai_block_reason}")
         return False
-    # Respect the cycle profit target — stop trading once it's hit
+    # Hard stop 2: cycle profit target hit — stop trading this cycle
     if portfolio.cycle_profit >= global_profit_target:
         ai_block_reason = f"Cycle profit target ${global_profit_target:.2f} reached"
         print(f"[AI-AGENT] Blocked: {ai_block_reason} (profit=${portfolio.cycle_profit:.2f})")
         return False
-    # Enforce time-based price limits in code (not just prompt)
-    time_left_secs = market.get_time_left_seconds()
-    time_left_min = time_left_secs / 60
-    if time_left_min <= 10:
-        ai_block_reason = f"Only {time_left_min:.0f} min left — no entries in last 10 min"
-        print(f"[AI-AGENT] Blocked: {ai_block_reason}")
-        return False
-    if time_left_min > 45:
-        max_entry = 78
-    elif time_left_min > 30:
-        max_entry = 72
-    elif time_left_min > 15:
-        max_entry = 65
-    else:
-        max_entry = 55
+    # AI handles timing, price levels, and direction — trust it
     price = market.up_price if direction == "up" else market.down_price
-    if price > max_entry:
-        ai_block_reason = f"{direction.upper()} price {price}¢ > max {max_entry}¢ ({time_left_min:.0f} min left)"
-        print(f"[AI-AGENT] Blocked: {ai_block_reason}")
-        return False
     cost_per_share = price / 100.0
     if cost_per_share <= 0:
         ai_block_reason = "Invalid price (0¢)"
