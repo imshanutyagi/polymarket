@@ -698,18 +698,18 @@ class ClaudeStrategy:
             if time_remaining < 900 and favored_price > self.LATE_CYCLE_MAX_PRICE:
                 return actions
 
-            # Position sizing based on confidence
+            # Position sizing based on confidence — keep trades small relative to $4 cycle cap
             if self.confidence >= 80:
-                max_dollars = 20.0
-            elif self.confidence >= 60:
-                max_dollars = 15.0
-            else:
                 max_dollars = 10.0
+            elif self.confidence >= 60:
+                max_dollars = 7.0
+            else:
+                max_dollars = 5.0
 
             # Last 15 min: scale max spend by how extreme the odds are
             # 95/5 or 90/10 (underdog ≤10c) → max $1
             # 80/20 or 60/40 (underdog 11–40c) → max $3
-            # 50/50 area or balanced        → max $5
+            # 50/50 area or balanced → max $5
             if time_remaining < 900:
                 cheaper_side = min(up_price, down_price)
                 if cheaper_side <= 10:
