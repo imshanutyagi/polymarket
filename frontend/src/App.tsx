@@ -1098,6 +1098,241 @@ function App() {
               Bot Strategies
             </h2>
 
+            {/* Claude Strategy: AI Confluence — pinned to top */}
+            <div
+              onClick={() => toggleStrategy('CLAUDE')}
+              className={`p-4 rounded-xl border cursor-pointer transition-colors ${strategies.strategy_claude
+                ? 'bg-violet-900/40 border-violet-500 shadow-[0_0_15px_rgba(139,92,246,0.3)]'
+                : 'bg-gray-800 border-gray-700 hover:border-gray-500'
+                }`}
+            >
+              <div className="flex justify-between items-start mb-2">
+                <h3 className={`font-bold ${strategies.strategy_claude
+                  ? 'text-violet-300'
+                  : 'text-gray-300'
+                  }`}>Claude Strategy: AI Confluence</h3>
+                <div className={`w-5 h-5 rounded-full border flex items-center justify-center ${strategies.strategy_claude
+                  ? 'bg-violet-500 border-violet-500 text-white'
+                  : 'border-gray-600'
+                  }`}>
+                  {strategies.strategy_claude && <Check className="w-3 h-3" />}
+                </div>
+              </div>
+              <p className="text-xs text-gray-500 leading-relaxed mb-3">
+                EMA crossover + RSI + multi-timeframe trend confluence. 3-zone profit system, graduated stop-loss, and 10-min timeout rule.
+              </p>
+
+              {strategies.strategy_claude && (
+                <div className="space-y-2">
+                  <div className="flex items-center space-x-3 text-xs font-semibold">
+                    <div className={`px-3 py-1 rounded-lg ${
+                      strategies.claude_phase === 1 ? 'bg-gray-900 text-yellow-400' :
+                      strategies.claude_phase === 2 ? 'bg-gray-900 text-green-400' :
+                      strategies.claude_phase === 3 ? 'bg-gray-900 text-orange-400' :
+                      'bg-gray-900 text-red-400'
+                    }`}>
+                      Phase {strategies.claude_phase}/4 {strategies.claude_phase === 1 ? '(Observing)' : strategies.claude_phase === 2 ? '(Trading)' : strategies.claude_phase === 3 ? '(Cautious)' : '(Exit Only)'}
+                    </div>
+                    <div className={`px-3 py-1 rounded-lg bg-gray-900 ${
+                      strategies.claude_confidence >= 75 ? 'text-green-400' :
+                      strategies.claude_confidence >= 50 ? 'text-yellow-400' :
+                      'text-gray-500'
+                    }`}>
+                      Confidence: {strategies.claude_confidence}%
+                    </div>
+                  </div>
+                  {strategies.claude_exit_reason && (
+                    <div className="text-xs px-3 py-1 rounded-lg bg-gray-900 text-violet-400 font-mono">
+                      Last exit: {strategies.claude_exit_reason}
+                    </div>
+                  )}
+                </div>
+              )}
+              {strategies.strategy_claude && (
+                <div style={{marginTop: '12px', padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px'}} onClick={e => e.stopPropagation()}>
+                  <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px'}}>
+                    <span style={{fontSize: '12px', fontWeight: 600, color: '#a0aec0'}}>🤖 AI AGENT</span>
+                    <button
+                      onClick={() => ws?.send(JSON.stringify({action: 'TOGGLE_AI_AGENT'}))}
+                      style={{
+                        padding: '3px 10px', borderRadius: '12px', border: 'none', cursor: 'pointer', fontSize: '11px', fontWeight: 600,
+                        background: aiAgent.enabled ? '#48bb78' : '#4a5568',
+                        color: 'white'
+                      }}
+                    >{aiAgent.enabled ? 'ON' : 'OFF'}</button>
+                  </div>
+                  <select
+                    value={aiAgent.model}
+                    onChange={e => ws?.send(JSON.stringify({action: 'SET_AI_CONFIG', model: e.target.value}))}
+                    style={{width: '100%', marginBottom: '6px', padding: '4px', background: '#2d3748', color: 'white', border: '1px solid #4a5568', borderRadius: '4px', fontSize: '12px'}}
+                  >
+                    <optgroup label="Anthropic">
+                      <option value="claude-haiku">Claude Haiku 4.5 — fast &amp; cheap</option>
+                      <option value="claude-sonnet">Claude Sonnet 4.6 — balanced</option>
+                      <option value="claude-opus">Claude Opus 4.6 — most powerful</option>
+                    </optgroup>
+                    <optgroup label="Google">
+                      <option value="gemini-flash">Gemini 2.0 Flash — fast &amp; free tier</option>
+                      <option value="gemini-pro">Gemini 2.0 Pro — stronger reasoning</option>
+                    </optgroup>
+                  </select>
+                  <div style={{display: 'flex', gap: '4px'}}>
+                    <input
+                      type="password"
+                      placeholder={aiAgent.has_key ? "API key saved ✓" : "Enter API key..."}
+                      id="ai-key-input"
+                      style={{flex: 1, padding: '4px 8px', background: '#2d3748', color: 'white', border: '1px solid #4a5568', borderRadius: '4px', fontSize: '11px'}}
+                    />
+                    <button
+                      onClick={() => {
+                        const key = (document.getElementById('ai-key-input') as HTMLInputElement)?.value;
+                        if (key) ws?.send(JSON.stringify({action: 'SET_AI_CONFIG', api_key: key}));
+                      }}
+                      style={{padding: '4px 8px', background: '#4299e1', color: 'white', border: 'none', borderRadius: '4px', fontSize: '11px', cursor: 'pointer'}}
+                    >Save</button>
+                    <button
+                      onClick={() => {
+                        setAiTestResult(null);
+                        setAiTesting(true);
+                        ws?.send(JSON.stringify({action: 'TEST_AI'}));
+                      }}
+                      style={{padding: '4px 8px', background: '#805ad5', color: 'white', border: 'none', borderRadius: '4px', fontSize: '11px', cursor: 'pointer', whiteSpace: 'nowrap'}}
+                    >{aiTesting ? '...' : 'Test'}</button>
+                  </div>
+                  {aiTestResult && (
+                    <div style={{marginTop: '6px', padding: '6px 8px', borderRadius: '4px', fontSize: '11px',
+                      background: aiTestResult.ok ? 'rgba(72,187,120,0.15)' : 'rgba(252,129,129,0.15)',
+                      color: aiTestResult.ok ? '#48bb78' : '#fc8181',
+                      border: `1px solid ${aiTestResult.ok ? '#48bb78' : '#fc8181'}`}}>
+                      {aiTestResult.message}
+                    </div>
+                  )}
+                  {aiAgent.enabled && (
+                    <div style={{marginTop: '8px'}}>
+                      <div style={{marginBottom: '6px', padding: '6px 8px', borderRadius: '6px', background: '#1a202c', border: '1px solid #2d3748'}}>
+                        {aiAgent.state === 'observing' && (
+                          <span style={{fontSize: '11px', color: '#ecc94b', fontWeight: 600}}>
+                            Observing market... {aiAgent.observe_seconds_left > 0 ? `${Math.floor(aiAgent.observe_seconds_left / 60)}:${String(aiAgent.observe_seconds_left % 60).padStart(2,'0')} left` : 'deciding...'}
+                          </span>
+                        )}
+                        {aiAgent.state === 'rescanning' && (
+                          <span style={{fontSize: '11px', color: '#63b3ed', fontWeight: 600}}>
+                            Quick rescan... {aiAgent.rescan_seconds_left > 0 ? `${aiAgent.rescan_seconds_left}s left` : 'deciding...'}
+                          </span>
+                        )}
+                        {aiAgent.state === 'holding' && (
+                          <span style={{fontSize: '11px', color: '#48bb78', fontWeight: 600}}>Holding position</span>
+                        )}
+                        {(aiAgent.state === 'idle' || !aiAgent.state) && (
+                          <span style={{fontSize: '11px', color: '#718096'}}>Waiting for live market...</span>
+                        )}
+                        {aiAgent.block_reason && aiAgent.state !== 'holding' && (
+                          <div style={{marginTop: '4px', fontSize: '10px', color: '#fc8181', fontWeight: 500}}>
+                            ⚠ Blocked: {aiAgent.block_reason}
+                          </div>
+                        )}
+                      </div>
+                      <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px'}}>
+                        <span style={{fontSize: '11px', color: '#a0aec0'}}>AI Signal</span>
+                        <span style={{fontSize: '12px', fontWeight: 700,
+                          color: aiAgent.last_signal === 'BUY_UP' ? '#48bb78' : aiAgent.last_signal === 'BUY_DOWN' ? '#fc8181' : '#a0aec0'}}>
+                          {aiAgent.last_signal === 'WAIT' ? '— WAIT —' : aiAgent.last_signal}
+                        </span>
+                      </div>
+                      <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '3px'}}>
+                        <span style={{fontSize: '11px', color: '#a0aec0'}}>AI Confidence</span>
+                        <span style={{fontSize: '11px', fontWeight: 600,
+                          color: aiAgent.confidence >= 75 ? '#48bb78' : aiAgent.confidence >= 50 ? '#ecc94b' : '#a0aec0'}}>
+                          {aiAgent.confidence}%
+                        </span>
+                      </div>
+                      <div style={{width: '100%', height: '5px', background: '#2d3748', borderRadius: '3px', overflow: 'hidden', marginBottom: '10px'}}>
+                        <div style={{
+                          height: '100%', borderRadius: '3px',
+                          width: `${aiAgent.confidence}%`,
+                          background: aiAgent.confidence >= 75 ? '#48bb78' : aiAgent.confidence >= 50 ? '#ecc94b' : '#4a5568',
+                          transition: 'width 0.5s ease'
+                        }} />
+                      </div>
+                      <div style={{borderTop: '1px solid #2d3748', marginBottom: '10px'}} />
+                      <div style={{marginBottom: '10px'}}>
+                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px'}}>
+                          <span style={{fontSize: '11px', fontWeight: 600, color: '#e2e8f0'}}>Min Confidence</span>
+                          <span style={{fontSize: '12px', fontWeight: 700,
+                            color: aiAgent.confidence_threshold >= 70 ? '#fc8181' : aiAgent.confidence_threshold >= 55 ? '#ecc94b' : '#48bb78'}}>
+                            {aiAgent.confidence_threshold}%
+                          </span>
+                        </div>
+                        <p style={{fontSize: '10px', color: '#718096', marginBottom: '4px', lineHeight: '1.3'}}>
+                          AI will only trade when its confidence is at or above this level. Higher = fewer but stronger trades.
+                        </p>
+                        <input
+                          type="range" min={30} max={90} step={5}
+                          value={aiAgent.confidence_threshold}
+                          onChange={e => ws?.send(JSON.stringify({action: 'SET_AI_CONFIG', confidence_threshold: parseInt(e.target.value)}))}
+                          style={{width: '100%', accentColor: '#ecc94b', cursor: 'pointer'}}
+                        />
+                        <div style={{display: 'flex', justifyContent: 'space-between', fontSize: '9px', color: '#4a5568'}}>
+                          <span>30% (more trades)</span>
+                          <span>90% (high conviction)</span>
+                        </div>
+                      </div>
+                      <div style={{marginBottom: '6px'}}>
+                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px'}}>
+                          <span style={{fontSize: '11px', fontWeight: 600, color: '#e2e8f0'}}>Max Entry Price</span>
+                          <span style={{fontSize: '12px', fontWeight: 700, color: aiAgent.max_entry === 0 ? '#a0aec0' : '#63b3ed'}}>
+                            {aiAgent.max_entry === 0 ? 'OFF' : `${aiAgent.max_entry}¢`}
+                          </span>
+                        </div>
+                        <p style={{fontSize: '10px', color: '#718096', marginBottom: '4px', lineHeight: '1.3'}}>
+                          Block entries if token already costs more than this. Above ~70¢ means little profit margin left. Set to 0 to disable.
+                        </p>
+                        <div style={{display: 'flex', gap: '4px', flexWrap: 'wrap'}}>
+                          {[0, 60, 65, 70, 75, 80].map(v => (
+                            <button
+                              key={v}
+                              onClick={() => ws?.send(JSON.stringify({action: 'SET_AI_CONFIG', max_entry: v}))}
+                              style={{
+                                padding: '3px 8px', borderRadius: '10px', border: 'none', cursor: 'pointer',
+                                fontSize: '11px', fontWeight: 600,
+                                background: aiAgent.max_entry === v ? '#4299e1' : '#2d3748',
+                                color: aiAgent.max_entry === v ? 'white' : '#a0aec0'
+                              }}
+                            >{v === 0 ? 'OFF' : `${v}¢`}</button>
+                          ))}
+                        </div>
+                      </div>
+                      <div style={{marginBottom: '6px'}}>
+                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px'}}>
+                          <span style={{fontSize: '11px', fontWeight: 600, color: '#e2e8f0'}}>Max Spread</span>
+                          <span style={{fontSize: '12px', fontWeight: 700, color: aiAgent.max_spread === 0 ? '#a0aec0' : '#ed8936'}}>
+                            {aiAgent.max_spread === 0 ? 'OFF' : `${aiAgent.max_spread}¢`}
+                          </span>
+                        </div>
+                        <p style={{fontSize: '10px', color: '#718096', marginBottom: '4px', lineHeight: '1.3'}}>
+                          Spread = gap between buy price and sell price. Wide spread means you lose that amount just entering — e.g. 8¢ spread means you need an 8¢ move just to break even. Set to 0 to disable.
+                        </p>
+                        <div style={{display: 'flex', gap: '4px', flexWrap: 'wrap'}}>
+                          {[0, 3, 5, 8, 10, 15].map(v => (
+                            <button
+                              key={v}
+                              onClick={() => ws?.send(JSON.stringify({action: 'SET_AI_CONFIG', max_spread: v}))}
+                              style={{
+                                padding: '3px 8px', borderRadius: '10px', border: 'none', cursor: 'pointer',
+                                fontSize: '11px', fontWeight: 600,
+                                background: aiAgent.max_spread === v ? '#ed8936' : '#2d3748',
+                                color: aiAgent.max_spread === v ? 'white' : '#a0aec0'
+                              }}
+                            >{v === 0 ? 'OFF' : `${v}¢`}</button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
             <div
               onClick={() => toggleStrategy('A')}
               className={`p-4 rounded-xl border cursor-pointer transition-colors ${strategies.strategy_a
@@ -1317,251 +1552,6 @@ function App() {
               </div>
             </div>
 
-            {/* Claude Strategy: AI Confluence */}
-            <div
-              onClick={() => toggleStrategy('CLAUDE')}
-              className={`p-4 rounded-xl border cursor-pointer transition-colors ${strategies.strategy_claude
-                ? 'bg-violet-900/40 border-violet-500 shadow-[0_0_15px_rgba(139,92,246,0.3)]'
-                : 'bg-gray-800 border-gray-700 hover:border-gray-500'
-                }`}
-            >
-              <div className="flex justify-between items-start mb-2">
-                <h3 className={`font-bold ${strategies.strategy_claude
-                  ? 'text-violet-300'
-                  : 'text-gray-300'
-                  }`}>Claude Strategy: AI Confluence</h3>
-                <div className={`w-5 h-5 rounded-full border flex items-center justify-center ${strategies.strategy_claude
-                  ? 'bg-violet-500 border-violet-500 text-white'
-                  : 'border-gray-600'
-                  }`}>
-                  {strategies.strategy_claude && <Check className="w-3 h-3" />}
-                </div>
-              </div>
-              <p className="text-xs text-gray-500 leading-relaxed mb-3">
-                EMA crossover + RSI + multi-timeframe trend confluence. 3-zone profit system, graduated stop-loss, and 10-min timeout rule.
-              </p>
-
-              {strategies.strategy_claude && (
-                <div className="space-y-2">
-                  <div className="flex items-center space-x-3 text-xs font-semibold">
-                    <div className={`px-3 py-1 rounded-lg ${
-                      strategies.claude_phase === 1 ? 'bg-gray-900 text-yellow-400' :
-                      strategies.claude_phase === 2 ? 'bg-gray-900 text-green-400' :
-                      strategies.claude_phase === 3 ? 'bg-gray-900 text-orange-400' :
-                      'bg-gray-900 text-red-400'
-                    }`}>
-                      Phase {strategies.claude_phase}/4 {strategies.claude_phase === 1 ? '(Observing)' : strategies.claude_phase === 2 ? '(Trading)' : strategies.claude_phase === 3 ? '(Cautious)' : '(Exit Only)'}
-                    </div>
-                    <div className={`px-3 py-1 rounded-lg bg-gray-900 ${
-                      strategies.claude_confidence >= 75 ? 'text-green-400' :
-                      strategies.claude_confidence >= 50 ? 'text-yellow-400' :
-                      'text-gray-500'
-                    }`}>
-                      Confidence: {strategies.claude_confidence}%
-                    </div>
-                  </div>
-                  {strategies.claude_exit_reason && (
-                    <div className="text-xs px-3 py-1 rounded-lg bg-gray-900 text-violet-400 font-mono">
-                      Last exit: {strategies.claude_exit_reason}
-                    </div>
-                  )}
-                </div>
-              )}
-              {strategies.strategy_claude && (
-                <div style={{marginTop: '12px', padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px'}} onClick={e => e.stopPropagation()}>
-                  <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px'}}>
-                    <span style={{fontSize: '12px', fontWeight: 600, color: '#a0aec0'}}>🤖 AI AGENT</span>
-                    <button
-                      onClick={() => ws?.send(JSON.stringify({action: 'TOGGLE_AI_AGENT'}))}
-                      style={{
-                        padding: '3px 10px', borderRadius: '12px', border: 'none', cursor: 'pointer', fontSize: '11px', fontWeight: 600,
-                        background: aiAgent.enabled ? '#48bb78' : '#4a5568',
-                        color: 'white'
-                      }}
-                    >{aiAgent.enabled ? 'ON' : 'OFF'}</button>
-                  </div>
-                  <select
-                    value={aiAgent.model}
-                    onChange={e => ws?.send(JSON.stringify({action: 'SET_AI_CONFIG', model: e.target.value}))}
-                    style={{width: '100%', marginBottom: '6px', padding: '4px', background: '#2d3748', color: 'white', border: '1px solid #4a5568', borderRadius: '4px', fontSize: '12px'}}
-                  >
-                    <optgroup label="Anthropic">
-                      <option value="claude-haiku">Claude Haiku 4.5 — fast &amp; cheap</option>
-                      <option value="claude-sonnet">Claude Sonnet 4.6 — balanced</option>
-                      <option value="claude-opus">Claude Opus 4.6 — most powerful</option>
-                    </optgroup>
-                    <optgroup label="Google">
-                      <option value="gemini-flash">Gemini 2.0 Flash — fast &amp; free tier</option>
-                      <option value="gemini-pro">Gemini 2.0 Pro — stronger reasoning</option>
-                    </optgroup>
-                  </select>
-                  <div style={{display: 'flex', gap: '4px'}}>
-                    <input
-                      type="password"
-                      placeholder={aiAgent.has_key ? "API key saved ✓" : "Enter API key..."}
-                      id="ai-key-input"
-                      style={{flex: 1, padding: '4px 8px', background: '#2d3748', color: 'white', border: '1px solid #4a5568', borderRadius: '4px', fontSize: '11px'}}
-                    />
-                    <button
-                      onClick={() => {
-                        const key = (document.getElementById('ai-key-input') as HTMLInputElement)?.value;
-                        if (key) ws?.send(JSON.stringify({action: 'SET_AI_CONFIG', api_key: key}));
-                      }}
-                      style={{padding: '4px 8px', background: '#4299e1', color: 'white', border: 'none', borderRadius: '4px', fontSize: '11px', cursor: 'pointer'}}
-                    >Save</button>
-                    <button
-                      onClick={() => {
-                        setAiTestResult(null);
-                        setAiTesting(true);
-                        ws?.send(JSON.stringify({action: 'TEST_AI'}));
-                      }}
-                      style={{padding: '4px 8px', background: '#805ad5', color: 'white', border: 'none', borderRadius: '4px', fontSize: '11px', cursor: 'pointer', whiteSpace: 'nowrap'}}
-                    >{aiTesting ? '...' : 'Test'}</button>
-                  </div>
-                  {aiTestResult && (
-                    <div style={{marginTop: '6px', padding: '6px 8px', borderRadius: '4px', fontSize: '11px',
-                      background: aiTestResult.ok ? 'rgba(72,187,120,0.15)' : 'rgba(252,129,129,0.15)',
-                      color: aiTestResult.ok ? '#48bb78' : '#fc8181',
-                      border: `1px solid ${aiTestResult.ok ? '#48bb78' : '#fc8181'}`}}>
-                      {aiTestResult.message}
-                    </div>
-                  )}
-                  {aiAgent.enabled && (
-                    <div style={{marginTop: '8px'}}>
-                      {/* AI Agent Phase */}
-                      <div style={{marginBottom: '6px', padding: '6px 8px', borderRadius: '6px', background: '#1a202c', border: '1px solid #2d3748'}}>
-                        {aiAgent.state === 'observing' && (
-                          <span style={{fontSize: '11px', color: '#ecc94b', fontWeight: 600}}>
-                            Observing market... {aiAgent.observe_seconds_left > 0 ? `${Math.floor(aiAgent.observe_seconds_left / 60)}:${String(aiAgent.observe_seconds_left % 60).padStart(2,'0')} left` : 'deciding...'}
-                          </span>
-                        )}
-                        {aiAgent.state === 'rescanning' && (
-                          <span style={{fontSize: '11px', color: '#63b3ed', fontWeight: 600}}>
-                            Quick rescan... {aiAgent.rescan_seconds_left > 0 ? `${aiAgent.rescan_seconds_left}s left` : 'deciding...'}
-                          </span>
-                        )}
-                        {aiAgent.state === 'holding' && (
-                          <span style={{fontSize: '11px', color: '#48bb78', fontWeight: 600}}>Holding position</span>
-                        )}
-                        {(aiAgent.state === 'idle' || !aiAgent.state) && (
-                          <span style={{fontSize: '11px', color: '#718096'}}>Waiting for live market...</span>
-                        )}
-                        {aiAgent.block_reason && aiAgent.state !== 'holding' && (
-                          <div style={{marginTop: '4px', fontSize: '10px', color: '#fc8181', fontWeight: 500}}>
-                            ⚠ Blocked: {aiAgent.block_reason}
-                          </div>
-                        )}
-                      </div>
-                      {/* AI Signal */}
-                      <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px'}}>
-                        <span style={{fontSize: '11px', color: '#a0aec0'}}>AI Signal</span>
-                        <span style={{fontSize: '12px', fontWeight: 700,
-                          color: aiAgent.last_signal === 'BUY_UP' ? '#48bb78' : aiAgent.last_signal === 'BUY_DOWN' ? '#fc8181' : '#a0aec0'}}>
-                          {aiAgent.last_signal === 'WAIT' ? '— WAIT —' : aiAgent.last_signal}
-                        </span>
-                      </div>
-                      {/* AI Confidence bar — live reading */}
-                      <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '3px'}}>
-                        <span style={{fontSize: '11px', color: '#a0aec0'}}>AI Confidence</span>
-                        <span style={{fontSize: '11px', fontWeight: 600,
-                          color: aiAgent.confidence >= 75 ? '#48bb78' : aiAgent.confidence >= 50 ? '#ecc94b' : '#a0aec0'}}>
-                          {aiAgent.confidence}%
-                        </span>
-                      </div>
-                      <div style={{width: '100%', height: '5px', background: '#2d3748', borderRadius: '3px', overflow: 'hidden', marginBottom: '10px'}}>
-                        <div style={{
-                          height: '100%', borderRadius: '3px',
-                          width: `${aiAgent.confidence}%`,
-                          background: aiAgent.confidence >= 75 ? '#48bb78' : aiAgent.confidence >= 50 ? '#ecc94b' : '#4a5568',
-                          transition: 'width 0.5s ease'
-                        }} />
-                      </div>
-
-                      {/* Divider */}
-                      <div style={{borderTop: '1px solid #2d3748', marginBottom: '10px'}} />
-
-                      {/* Confidence Threshold Slider */}
-                      <div style={{marginBottom: '10px'}}>
-                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px'}}>
-                          <span style={{fontSize: '11px', fontWeight: 600, color: '#e2e8f0'}}>Min Confidence</span>
-                          <span style={{fontSize: '12px', fontWeight: 700,
-                            color: aiAgent.confidence_threshold >= 70 ? '#fc8181' : aiAgent.confidence_threshold >= 55 ? '#ecc94b' : '#48bb78'}}>
-                            {aiAgent.confidence_threshold}%
-                          </span>
-                        </div>
-                        <p style={{fontSize: '10px', color: '#718096', marginBottom: '4px', lineHeight: '1.3'}}>
-                          AI will only trade when its confidence is at or above this level. Higher = fewer but stronger trades.
-                        </p>
-                        <input
-                          type="range" min={30} max={90} step={5}
-                          value={aiAgent.confidence_threshold}
-                          onChange={e => ws?.send(JSON.stringify({action: 'SET_AI_CONFIG', confidence_threshold: parseInt(e.target.value)}))}
-                          style={{width: '100%', accentColor: '#ecc94b', cursor: 'pointer'}}
-                        />
-                        <div style={{display: 'flex', justifyContent: 'space-between', fontSize: '9px', color: '#4a5568'}}>
-                          <span>30% (more trades)</span>
-                          <span>90% (high conviction)</span>
-                        </div>
-                      </div>
-
-                      {/* Max Entry Price */}
-                      <div style={{marginBottom: '6px'}}>
-                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px'}}>
-                          <span style={{fontSize: '11px', fontWeight: 600, color: '#e2e8f0'}}>Max Entry Price</span>
-                          <span style={{fontSize: '12px', fontWeight: 700, color: aiAgent.max_entry === 0 ? '#a0aec0' : '#63b3ed'}}>
-                            {aiAgent.max_entry === 0 ? 'OFF' : `${aiAgent.max_entry}¢`}
-                          </span>
-                        </div>
-                        <p style={{fontSize: '10px', color: '#718096', marginBottom: '4px', lineHeight: '1.3'}}>
-                          Block entries if token already costs more than this. Above ~70¢ means little profit margin left. Set to 0 to disable.
-                        </p>
-                        <div style={{display: 'flex', gap: '4px', flexWrap: 'wrap'}}>
-                          {[0, 60, 65, 70, 75, 80].map(v => (
-                            <button
-                              key={v}
-                              onClick={() => ws?.send(JSON.stringify({action: 'SET_AI_CONFIG', max_entry: v}))}
-                              style={{
-                                padding: '3px 8px', borderRadius: '10px', border: 'none', cursor: 'pointer',
-                                fontSize: '11px', fontWeight: 600,
-                                background: aiAgent.max_entry === v ? '#4299e1' : '#2d3748',
-                                color: aiAgent.max_entry === v ? 'white' : '#a0aec0'
-                              }}
-                            >{v === 0 ? 'OFF' : `${v}¢`}</button>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* Max Spread */}
-                      <div style={{marginBottom: '6px'}}>
-                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px'}}>
-                          <span style={{fontSize: '11px', fontWeight: 600, color: '#e2e8f0'}}>Max Spread</span>
-                          <span style={{fontSize: '12px', fontWeight: 700, color: aiAgent.max_spread === 0 ? '#a0aec0' : '#ed8936'}}>
-                            {aiAgent.max_spread === 0 ? 'OFF' : `${aiAgent.max_spread}¢`}
-                          </span>
-                        </div>
-                        <p style={{fontSize: '10px', color: '#718096', marginBottom: '4px', lineHeight: '1.3'}}>
-                          Spread = gap between buy price and sell price. Wide spread means you lose that amount just entering — e.g. 8¢ spread means you need an 8¢ move just to break even. Set to 0 to disable.
-                        </p>
-                        <div style={{display: 'flex', gap: '4px', flexWrap: 'wrap'}}>
-                          {[0, 3, 5, 8, 10, 15].map(v => (
-                            <button
-                              key={v}
-                              onClick={() => ws?.send(JSON.stringify({action: 'SET_AI_CONFIG', max_spread: v}))}
-                              style={{
-                                padding: '3px 8px', borderRadius: '10px', border: 'none', cursor: 'pointer',
-                                fontSize: '11px', fontWeight: 600,
-                                background: aiAgent.max_spread === v ? '#ed8936' : '#2d3748',
-                                color: aiAgent.max_spread === v ? 'white' : '#a0aec0'
-                              }}
-                            >{v === 0 ? 'OFF' : `${v}¢`}</button>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
 
           </div>
 
