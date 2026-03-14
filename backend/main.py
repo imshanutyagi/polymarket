@@ -992,6 +992,16 @@ async def run_ai_agent():
             if not market.is_live or not market.prices_loaded:
                 continue
 
+            # Always check if a held position was closed — must happen before any early-exit guards
+            # so the state never gets stuck in "holding" due to time/profit checks skipping this block
+            has_position = portfolio.total_spent > 0
+            now = time.time()
+            if ai_agent_state == "holding" and not has_position:
+                ai_agent_state = "rescanning"
+                ai_rescan_start = now
+                print("[AI-AGENT] Position closed → Quick rescan...")
+                continue
+
             time_left = market.get_time_left_seconds()
             if time_left < 600:  # < 10 min left, don't enter new positions
                 continue
@@ -999,16 +1009,6 @@ async def run_ai_agent():
             # Stop scanning once cycle profit target is reached
             if portfolio.cycle_profit >= global_profit_target:
                 await asyncio.sleep(10)
-                continue
-
-            has_position = portfolio.total_spent > 0
-            now = time.time()
-
-            # holding → rescanning: position was closed (profit or stop-loss)
-            if ai_agent_state == "holding" and not has_position:
-                ai_agent_state = "rescanning"
-                ai_rescan_start = now
-                print("[AI-AGENT] Position closed → Quick rescan (20-40 sec)...")
                 continue
 
             # Start observation if idle
