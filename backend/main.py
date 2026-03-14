@@ -930,24 +930,24 @@ async def get_ai_signal(force: bool = False) -> str:
         return ai_last_signal
 
 
-async def ai_direct_buy(direction: str):
-    """AI agent places a direct buy into the active portfolio."""
+async def ai_direct_buy(direction: str) -> bool:
+    """AI agent places a direct buy into the active portfolio. Returns True if order was placed."""
     global portfolio
     # Require fresh CLOB prices — don't trade on stale/Gamma prices
     clob_age = time.time() - clob_last_update_time
     if clob_last_update_time == 0.0 or clob_age > 30:
         print(f"[AI-AGENT] Blocked: CLOB prices not fresh (last update {clob_age:.0f}s ago) — waiting for real prices")
-        return
+        return False
     # Respect the cycle profit target — stop trading once it's hit
     if portfolio.cycle_profit >= global_profit_target:
         print(f"[AI-AGENT] Cycle target ${global_profit_target:.2f} reached (profit=${portfolio.cycle_profit:.2f}) — no new entries")
-        return
+        return False
     # Enforce time-based price limits in code (not just prompt)
     time_left_secs = market.get_time_left_seconds()
     time_left_min = time_left_secs / 60
     if time_left_min <= 10:
         print(f"[AI-AGENT] Blocked: only {time_left_min:.1f} min left — no entries in last 10 min")
-        return
+        return False
     if time_left_min > 45:
         max_entry = 78
     elif time_left_min > 30:
@@ -959,10 +959,10 @@ async def ai_direct_buy(direction: str):
     price = market.up_price if direction == "up" else market.down_price
     if price > max_entry:
         print(f"[AI-AGENT] Blocked: {direction} price {price}¢ > max {max_entry}¢ for {time_left_min:.0f} min remaining")
-        return
+        return False
     cost_per_share = price / 100.0
     if cost_per_share <= 0:
-        return
+        return False
     if ai_last_confidence >= 75:
         max_dollars = 10.0
     elif ai_last_confidence >= 60:
@@ -977,7 +977,7 @@ async def ai_direct_buy(direction: str):
         cost = round(shares * cost_per_share, 4)
     if shares <= 0 or portfolio.balance < cost:
         print(f"[AI-AGENT] Not enough balance for {direction} buy")
-        return
+        return False
     portfolio.balance -= cost
     portfolio.positions[direction] += shares
     portfolio.total_spent += cost
@@ -985,6 +985,7 @@ async def ai_direct_buy(direction: str):
     print(f"[AI-AGENT] BUY {direction.upper()} | {shares} shares @ {price}¢ | cost=${cost:.2f} | conf={ai_last_confidence}%")
     if live_mode_enabled:
         asyncio.create_task(execute_live_buy(direction, shares, price))
+    return True
 
 
 async def run_ai_agent():
@@ -1037,9 +1038,11 @@ async def run_ai_agent():
                     elapsed = round(now - ai_observe_start)
                     if signal in ("BUY_UP", "BUY_DOWN") and ai_last_confidence >= 40:
                         direction = "up" if signal == "BUY_UP" else "down"
-                        await ai_direct_buy(direction)
-                        ai_agent_state = "holding"
-                        print(f"[AI-AGENT] Entered {direction.upper()} at {elapsed}s (conf={ai_last_confidence}%)")
+                        bought = await ai_direct_buy(direction)
+                        if bought:
+                            ai_agent_state = "holding"
+                            print(f"[AI-AGENT] Entered {direction.upper()} at {elapsed}s (conf={ai_last_confidence}%)")
+                        # If buy was blocked, stay in observing and retry on next tick
                     else:
                         print(f"[AI-AGENT] Scanning ({elapsed}s): {signal} {ai_last_confidence}% — waiting for opportunity...")
 
@@ -1051,9 +1054,11 @@ async def run_ai_agent():
                     elapsed = round(now - ai_rescan_start)
                     if signal in ("BUY_UP", "BUY_DOWN") and ai_last_confidence >= 40:
                         direction = "up" if signal == "BUY_UP" else "down"
-                        await ai_direct_buy(direction)
-                        ai_agent_state = "holding"
-                        print(f"[AI-AGENT] Re-entered {direction.upper()} at {elapsed}s (conf={ai_last_confidence}%)")
+                        bought = await ai_direct_buy(direction)
+                        if bought:
+                            ai_agent_state = "holding"
+                            print(f"[AI-AGENT] Re-entered {direction.upper()} at {elapsed}s (conf={ai_last_confidence}%)")
+                        # If buy was blocked, stay in rescanning and retry on next tick
                     else:
                         print(f"[AI-AGENT] Rescanning ({elapsed}s): {signal} {ai_last_confidence}% — waiting...")
 
