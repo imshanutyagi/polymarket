@@ -69,6 +69,8 @@ function App() {
 
   // AI Agent state
   const [aiAgent, setAiAgent] = useState({enabled: false, model: 'claude', last_signal: 'WAIT', confidence: 0, has_key: false});
+  const [aiTestResult, setAiTestResult] = useState<{ok: boolean, message: string} | null>(null);
+  const [aiTesting, setAiTesting] = useState(false);
 
   // On mount: verify stored token
   useEffect(() => {
@@ -402,6 +404,11 @@ function App() {
           const msg = JSON.parse(event.data);
           if (msg.type === "error") {
             alert(`⚠️ ${msg.message}`);
+            return;
+          }
+          if (msg.type === "ai_test_result") {
+            setAiTestResult({ok: msg.ok, message: msg.message});
+            setAiTesting(false);
             return;
           }
           if (msg.type === "state_update") {
@@ -1379,7 +1386,23 @@ function App() {
                       }}
                       style={{padding: '4px 8px', background: '#4299e1', color: 'white', border: 'none', borderRadius: '4px', fontSize: '11px', cursor: 'pointer'}}
                     >Save</button>
+                    <button
+                      onClick={() => {
+                        setAiTestResult(null);
+                        setAiTesting(true);
+                        ws?.send(JSON.stringify({action: 'TEST_AI'}));
+                      }}
+                      style={{padding: '4px 8px', background: '#805ad5', color: 'white', border: 'none', borderRadius: '4px', fontSize: '11px', cursor: 'pointer', whiteSpace: 'nowrap'}}
+                    >{aiTesting ? '...' : 'Test'}</button>
                   </div>
+                  {aiTestResult && (
+                    <div style={{marginTop: '6px', padding: '6px 8px', borderRadius: '4px', fontSize: '11px',
+                      background: aiTestResult.ok ? 'rgba(72,187,120,0.15)' : 'rgba(252,129,129,0.15)',
+                      color: aiTestResult.ok ? '#48bb78' : '#fc8181',
+                      border: `1px solid ${aiTestResult.ok ? '#48bb78' : '#fc8181'}`}}>
+                      {aiTestResult.message}
+                    </div>
+                  )}
                   {aiAgent.enabled && (
                     <div style={{marginTop: '8px'}}>
                       {/* AI Signal */}

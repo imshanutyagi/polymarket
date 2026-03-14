@@ -1975,6 +1975,21 @@ async def websocket_endpoint(websocket: WebSocket):
                 if key:
                     ai_api_key = key
                 save_settings()
+            elif action == "TEST_AI":
+                # Force a fresh AI call and send back the result immediately
+                if not ai_api_key:
+                    await websocket.send_text(json.dumps({"type": "ai_test_result", "ok": False, "message": "No API key saved. Enter your key and click Save first."}))
+                else:
+                    try:
+                        global ai_last_signal_time
+                        ai_last_signal_time = 0.0  # force fresh call
+                        sig = await get_ai_signal()
+                        await websocket.send_text(json.dumps({
+                            "type": "ai_test_result", "ok": True,
+                            "message": f"✓ API key works! Signal: {sig} ({ai_last_confidence}% confidence) — model: {ai_model}"
+                        }))
+                    except Exception as ex:
+                        await websocket.send_text(json.dumps({"type": "ai_test_result", "ok": False, "message": f"Error: {str(ex)}"}))
             elif action == "TOGGLE_LIVE_MODE":
                 if LIVE_TRADING_AVAILABLE:
                     live_mode_enabled = not live_mode_enabled
