@@ -652,7 +652,7 @@ ai_max_entry = 70             # max token price in cents allowed to enter (user-
 ai_max_spread = 8             # max bid-ask spread in cents allowed to enter (user-adjustable, 0=disabled)
 ai_clob_safe_mode = True      # if CLOB goes down while holding, auto cash-out to protect position
 ai_clob_down_since = 0.0      # timestamp when CLOB first went stale while holding (0 = not tracking)
-ai_prompt_mode = "smart"      # "classic" = simple trend-only prompt | "smart" = full multi-signal prompt
+ai_prompt_mode = "auto"       # "auto" | "classic" | "balanced" | "smart"
 
 # AI Agent state machine
 AI_OBSERVE_SECONDS = 120   # 2-min initial observation
@@ -741,7 +741,7 @@ def load_settings():
         ai_max_entry              = int(data.get("ai_max_entry", 70))
         ai_max_spread             = int(data.get("ai_max_spread", 8))
         ai_clob_safe_mode         = bool(data.get("ai_clob_safe_mode", True))
-        ai_prompt_mode            = data.get("ai_prompt_mode", "smart")
+        ai_prompt_mode            = data.get("ai_prompt_mode", "auto")
         print(f"[SETTINGS] Loaded — active: {[k for k,v in data.items() if v is True]}")
     except Exception as e:
         print(f"[SETTINGS] Load error: {e}")
@@ -968,37 +968,84 @@ async def get_ai_signal(force: bool = False) -> str:
     else:
         liquidity_signal = "spread unknown"
 
-    if ai_prompt_mode == "classic":
+    # Auto mode: pick effective mode based on current market speed
+    abs_velocity_2m = abs(velocity_2m)
+    if ai_prompt_mode == "auto":
+        if abs_velocity_2m >= 8:
+            effective_mode = "classic"   # very fast market — act immediately
+        elif abs_velocity_2m >= 4:
+            effective_mode = "balanced"  # fast market — moderate filter
+        else:
+            effective_mode = "smart"     # slow/choppy — strict filter
+        print(f"[AI] Auto mode → {effective_mode} (velocity={velocity_2m:+.1f}¢/min)")
+    else:
+        effective_mode = ai_prompt_mode
+
+    # Shared header used by balanced/smart
+    base_snapshot = (
+        f"MARKET SNAPSHOT:\n"
+        f"- Time remaining: {time_left_min} minutes\n"
+        f"- UP token price: {market.up_price}¢  (pays $1 if BTC ends ABOVE ${market.price_to_beat:.0f})\n"
+        f"- DOWN token price: {market.down_price}¢  (pays $1 if BTC ends BELOW ${market.price_to_beat:.0f})\n"
+        f"- {btc_vs_target}\n"
+    )
+    base_rules = (
+        f"RULES:\n"
+        f"- Order size: {size_label} | Stop-loss: {stop_loss_str}\n"
+        f"- Balance: ${bal:.2f} | Min confidence: {ai_confidence_threshold}%\n"
+        f"- Max entry price: {'OFF' if ai_max_entry == 0 else str(ai_max_entry) + '¢'}\n"
+    )
+    base_reply = (
+        f"Reply with ONLY: SIGNAL:CONFIDENCE (no explanation)\n"
+        f"SIGNAL = BUY_UP, BUY_DOWN, or WAIT. CONFIDENCE = 0-100.\n"
+        f"Examples: BUY_UP:70  or  BUY_DOWN:65  or  WAIT:20"
+    )
+
+    if effective_mode == "classic":
         prompt = (
             f"You are a Polymarket scalping bot trading BTC Up/Down binary options.\n\n"
-            f"MARKET SNAPSHOT:\n"
-            f"- Time remaining: {time_left_min} minutes\n"
-            f"- UP token price: {market.up_price}¢  (pays $1 if BTC ends ABOVE ${market.price_to_beat:.0f})\n"
-            f"- DOWN token price: {market.down_price}¢  (pays $1 if BTC ends BELOW ${market.price_to_beat:.0f})\n"
-            f"- {btc_vs_target}\n"
+            + base_snapshot +
             f"- UP price trend: {trend_str}\n"
             f"- Recent UP prices (oldest→newest): {prices_str}\n\n"
-            f"RULES:\n"
-            f"- Order size: {size_label} | Stop-loss: {stop_loss_str}\n"
-            f"- Balance: ${bal:.2f} | Min confidence: {ai_confidence_threshold}%\n"
-            f"- Max entry price: {'OFF' if ai_max_entry == 0 else str(ai_max_entry) + '¢'}\n"
+            + base_rules +
             f"- BUY_UP if trend rising AND BTC near/above target\n"
             f"- BUY_DOWN if trend falling AND BTC near/below target\n"
             f"- WAIT if flat trend or no clear edge\n\n"
-            f"Reply with ONLY: SIGNAL:CONFIDENCE (no explanation)\n"
-            f"SIGNAL = BUY_UP, BUY_DOWN, or WAIT. CONFIDENCE = 0-100.\n"
-            f"Examples: BUY_UP:70  or  BUY_DOWN:65  or  WAIT:20"
+            + base_reply
         )
-    else:  # smart
+
+    elif effective_mode == "balanced":
         prompt = (
-            f"You are a Polymarket scalping bot. Trade BTC Up/Down binary options with HIGH CONVICTION only.\n"
+            f"You are a Polymarket scalping bot. Trade with good judgment — not too strict, not too loose.\n\n"
+            + base_snapshot +
+            f"\nPRICE ACTION:\n"
+            f"- Recent UP prices (oldest→newest): {prices_str}\n"
+            f"- Trend direction: {trend_str}\n"
+            f"- Trend consistency: {consistency_str}\n"
+            f"- Price velocity: {velocity_str}\n"
+            f"- Breakeven needed: {breakeven_str}\n\n"
+            f"THIS CYCLE SO FAR:\n"
+            f"- Cycle profit: ${portfolio.cycle_profit:+.2f} | Recent trades: {trades_str}\n\n"
+            + base_rules +
+            f"\nDECISION GUIDE:\n"
+            f"- BUY if trend is consistent AND velocity confirms direction AND BTC supports outcome\n"
+            f"- WAIT if trend is choppy OR velocity is flat/opposite to trend\n"
+            f"- WAIT if breakeven is unreachable in time remaining\n"
+            f"- If recent trades are losses → be more selective this entry\n\n"
+            + base_reply
+        )
+
+    else:  # smart
+        # Adaptive checklist: fast velocity reduces required conditions
+        if abs_velocity_2m >= 4:
+            checklist_rule = f"→ Market is FAST (velocity={velocity_2m:+.1f}¢/min) — need only 3/5 conditions. Act on momentum."
+        else:
+            checklist_rule = f"→ Market is SLOW/CHOPPY — need 4/5 conditions. Be strict."
+        prompt = (
+            f"You are a Polymarket scalping bot. Trade with HIGH CONVICTION only.\n"
             f"Your goal: only trade when multiple signals AGREE. If signals conflict → WAIT.\n\n"
-            f"MARKET SNAPSHOT:\n"
-            f"- Time remaining: {time_left_min} minutes\n"
-            f"- UP token price: {market.up_price}¢  (pays $1 if BTC ends ABOVE ${market.price_to_beat:.0f})\n"
-            f"- DOWN token price: {market.down_price}¢  (pays $1 if BTC ends BELOW ${market.price_to_beat:.0f})\n"
-            f"- {btc_vs_target}\n\n"
-            f"PRICE ACTION:\n"
+            + base_snapshot +
+            f"\nPRICE ACTION:\n"
             f"- Recent UP prices (oldest→newest): {prices_str}\n"
             f"- Trend direction: {trend_str}\n"
             f"- Trend consistency: {consistency_str}\n"
@@ -1010,23 +1057,17 @@ async def get_ai_signal(force: bool = False) -> str:
             f"- Ask depth: {ask_liq_str} | Bid depth: {bid_liq_str}\n"
             f"- 24h volume: {vol_str} USDC\n\n"
             f"THIS CYCLE SO FAR:\n"
-            f"- Cycle profit: ${portfolio.cycle_profit:+.2f}\n"
-            f"- Recent trades: {trades_str}\n\n"
-            f"RULES:\n"
-            f"- Order size: {size_label} | Stop-loss: {stop_loss_str}\n"
-            f"- Balance: ${bal:.2f} | Min confidence: {ai_confidence_threshold}%\n"
-            f"- Max entry price: {'OFF' if ai_max_entry == 0 else str(ai_max_entry) + '¢'}\n\n"
-            f"DECISION CHECKLIST (need 4-5 to BUY):\n"
-            f"1. Trend consistency is 'strongly rising/falling' — not choppy\n"
-            f"2. Velocity confirms direction (positive for UP, negative for DOWN)\n"
-            f"3. Order book pressure agrees (more buyers for UP, more sellers for DOWN)\n"
-            f"4. BTC position supports outcome (above target for UP, below for DOWN)\n"
-            f"5. Token price is below max entry and breakeven is reachable in time remaining\n"
-            f"6. If recent trades are losses → raise your bar, be more selective\n"
-            f"→ 3 or fewer conditions met → WAIT.\n\n"
-            f"Reply with ONLY: SIGNAL:CONFIDENCE (no explanation)\n"
-            f"SIGNAL = BUY_UP, BUY_DOWN, or WAIT. CONFIDENCE = 0-100.\n"
-            f"Examples: BUY_UP:70  or  BUY_DOWN:65  or  WAIT:20"
+            f"- Cycle profit: ${portfolio.cycle_profit:+.2f} | Recent trades: {trades_str}\n\n"
+            + base_rules +
+            f"\nDECISION CHECKLIST:\n"
+            f"1. Trend consistency is strongly rising/falling (not choppy)\n"
+            f"2. Velocity confirms direction (positive→UP, negative→DOWN)\n"
+            f"3. Order book pressure agrees with direction\n"
+            f"4. BTC position supports outcome\n"
+            f"5. Breakeven is reachable in time remaining\n"
+            f"6. Recent losses → raise your bar\n"
+            f"{checklist_rule}\n\n"
+            + base_reply
         )
 
     # Map model selection to actual API model IDs
@@ -2492,7 +2533,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 if "clob_safe_mode" in cmd:
                     ai_clob_safe_mode = bool(cmd["clob_safe_mode"])
                 if "prompt_mode" in cmd:
-                    ai_prompt_mode = cmd["prompt_mode"] if cmd["prompt_mode"] in ("classic", "smart") else "smart"
+                    ai_prompt_mode = cmd["prompt_mode"] if cmd["prompt_mode"] in ("auto", "classic", "balanced", "smart") else "auto"
                 save_settings()
             elif action == "TEST_AI":
                 # Force a fresh AI call and send back the result immediately
