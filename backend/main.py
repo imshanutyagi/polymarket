@@ -1181,9 +1181,8 @@ async def market_loop():
                 if market.cycle_end_time != 0.0:
                     up_wins, down_wins = market.resolve_cycle()
                     portfolio.reset_for_cycle(up_wins, down_wins)
-                
-                # Start new cycle
-                market.reset_cycle(market.current_price)
+
+                # Reset strategies/AI for the new cycle
                 strategy_a_strikes = 0
                 strategy_b_trade_done = False
                 strategy_a_done = False
@@ -1191,12 +1190,20 @@ async def market_loop():
                 scalper_5.reset_state()
                 scalper_6.reset_state()
                 claude_strategy.reset_state(full_reset=True)
-                market.prices_loaded = False  # Force wait for fresh prices on new cycle
-                clob_last_update_time = 0.0   # Reset CLOB freshness guard — must get new CLOB price before trading
-                asyncio.create_task(cancel_all_open_orders())  # Cancel stale GTC/resting orders
-                # Reset AI agent to start fresh observation on new cycle
+                market.prices_loaded = False
+                clob_last_update_time = 0.0
+                asyncio.create_task(cancel_all_open_orders())
                 ai_agent_state = "idle"
-                print(f"[CYCLE] New cycle started. Per-strategy guards active (prices_loaded, Claude observation).")
+
+                if market.is_live:
+                    # Live market ended — signal auto_discover to find next market immediately.
+                    # Do NOT call reset_cycle() here: that sets cycle_end_time = now+3600 which
+                    # tricks auto_discover into thinking the market is still active for another hour.
+                    market.cycle_end_time = 0.0
+                    print(f"[CYCLE] Live cycle ended — waiting for auto_discover to connect to next market.")
+                else:
+                    market.reset_cycle(market.current_price)
+                    print(f"[CYCLE] New simulation cycle started.")
                 
             # Update dynamic pricing
             market.update_pricing()
@@ -1809,8 +1816,8 @@ async def auto_discover_market():
     
     while True:
         try:
-            if market.is_live and market.get_time_left_seconds() > 10:
-                # Already synced — price updates come from the WS stream task
+            if market.is_live and market.get_time_left_seconds() > 30:
+                # Already synced and plenty of time left — check again in 5s
                 await asyncio.sleep(5)
                 continue
 
@@ -1918,8 +1925,10 @@ async def auto_discover_market():
                     continue
 
             if not found_new:
-                print(f"[AUTO] No new market found, retrying in 15s...")
-            await asyncio.sleep(15)
+                print(f"[AUTO] No new market found, retrying in 5s...")
+                await asyncio.sleep(5)
+            else:
+                await asyncio.sleep(15)
 
         except Exception as e:
             print(f"[AUTO] Discovery error: {e}")
