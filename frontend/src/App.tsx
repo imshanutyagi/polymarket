@@ -68,7 +68,7 @@ function App() {
   const [loginPassword, setLoginPassword] = useState("");
 
   // AI Agent state
-  const [aiAgent, setAiAgent] = useState({enabled: false, model: 'claude', last_signal: 'WAIT', has_key: false});
+  const [aiAgent, setAiAgent] = useState({enabled: false, model: 'claude', last_signal: 'WAIT', confidence: 0, has_key: false});
 
   // On mount: verify stored token
   useEffect(() => {
@@ -1380,9 +1380,32 @@ function App() {
                       style={{padding: '4px 8px', background: '#4299e1', color: 'white', border: 'none', borderRadius: '4px', fontSize: '11px', cursor: 'pointer'}}
                     >Save</button>
                   </div>
-                  {aiAgent.enabled && aiAgent.last_signal !== 'WAIT' && (
-                    <div style={{marginTop: '6px', fontSize: '11px', color: aiAgent.last_signal === 'BUY_UP' ? '#48bb78' : '#fc8181'}}>
-                      AI Signal: {aiAgent.last_signal}
+                  {aiAgent.enabled && (
+                    <div style={{marginTop: '8px'}}>
+                      {/* AI Signal */}
+                      <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px'}}>
+                        <span style={{fontSize: '11px', color: '#a0aec0'}}>AI Signal</span>
+                        <span style={{fontSize: '12px', fontWeight: 700,
+                          color: aiAgent.last_signal === 'BUY_UP' ? '#48bb78' : aiAgent.last_signal === 'BUY_DOWN' ? '#fc8181' : '#a0aec0'}}>
+                          {aiAgent.last_signal === 'WAIT' ? '— WAIT —' : aiAgent.last_signal}
+                        </span>
+                      </div>
+                      {/* AI Confidence bar */}
+                      <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '3px'}}>
+                        <span style={{fontSize: '11px', color: '#a0aec0'}}>AI Confidence</span>
+                        <span style={{fontSize: '11px', fontWeight: 600,
+                          color: aiAgent.confidence >= 75 ? '#48bb78' : aiAgent.confidence >= 50 ? '#ecc94b' : '#a0aec0'}}>
+                          {aiAgent.confidence}%
+                        </span>
+                      </div>
+                      <div style={{width: '100%', height: '5px', background: '#2d3748', borderRadius: '3px', overflow: 'hidden'}}>
+                        <div style={{
+                          height: '100%', borderRadius: '3px',
+                          width: `${aiAgent.confidence}%`,
+                          background: aiAgent.confidence >= 75 ? '#48bb78' : aiAgent.confidence >= 50 ? '#ecc94b' : '#4a5568',
+                          transition: 'width 0.5s ease'
+                        }} />
+                      </div>
                     </div>
                   )}
                 </div>

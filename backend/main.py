@@ -643,9 +643,10 @@ strategy_stats = {k: {"trades":0,"wins":0,"total_profit":0.0,"best":0.0,"worst":
 ai_agent_enabled = False
 ai_model = "claude"   # "claude" or "gemini"
 ai_api_key = ""
-ai_last_signal = "WAIT"   # last signal from AI
-ai_last_signal_time = 0.0  # when signal was last fetched
-AI_SIGNAL_INTERVAL = 30.0  # re-query AI every 30 seconds
+ai_last_signal = "WAIT"      # last signal from AI
+ai_last_confidence = 0       # 0-100 confidence from AI
+ai_last_signal_time = 0.0    # when signal was last fetched
+AI_SIGNAL_INTERVAL = 30.0    # re-query AI every 30 seconds
 
 def record_stat(strategy_key: str, profit: float):
     if strategy_key in strategy_stats:
@@ -809,15 +810,14 @@ async def execute_live_sell(direction: str, shares: float, price_cents: int):
 clients: List[WebSocket] = []
 
 async def get_ai_signal() -> str:
-    """Ask the selected AI model: BUY_UP, BUY_DOWN, or WAIT."""
-    global ai_last_signal, ai_last_signal_time
+    """Ask the selected AI model: BUY_UP/BUY_DOWN/WAIT with confidence 0-100."""
+    global ai_last_signal, ai_last_confidence, ai_last_signal_time
     if not ai_agent_enabled or not ai_api_key:
         return "WAIT"
     now = time.time()
     if now - ai_last_signal_time < AI_SIGNAL_INTERVAL:
         return ai_last_signal  # use cached signal
 
-    # Build price history summary
     history = market.history[-20:] if market.history else []
     prices_str = ", ".join([f"{int(p[1])}¢" for p in history[-10:]]) if history else "no data"
     time_left_min = int(market.get_time_left_seconds() / 60)
@@ -830,7 +830,9 @@ async def get_ai_signal() -> str:
         f"Target price to beat: ${market.price_to_beat:.2f}\n"
         f"Recent UP price trend (last 10 ticks): {prices_str}\n\n"
         f"Should I enter a trade now? Consider: price momentum, time remaining, odds value.\n"
-        f"Reply with ONLY one word: BUY_UP, BUY_DOWN, or WAIT"
+        f"Reply in this exact format: SIGNAL:CONFIDENCE\n"
+        f"Where SIGNAL is BUY_UP, BUY_DOWN, or WAIT, and CONFIDENCE is 0-100.\n"
+        f"Example: BUY_DOWN:75"
     )
 
     try:
@@ -839,35 +841,49 @@ async def get_ai_signal() -> str:
                 resp = await client.post(
                     "https://api.anthropic.com/v1/messages",
                     headers={"x-api-key": ai_api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                    json={"model": "claude-haiku-4-5-20251001", "max_tokens": 10,
+                    json={"model": "claude-haiku-4-5-20251001", "max_tokens": 20,
                           "messages": [{"role": "user", "content": prompt}]}
                 )
                 data = resp.json()
-                text = data.get("content", [{}])[0].get("text", "WAIT").strip().upper()
+                text = data.get("content", [{}])[0].get("text", "WAIT:0").strip().upper()
         else:  # gemini
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(
                     f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={ai_api_key}",
                     json={"contents": [{"parts": [{"text": prompt}]}],
-                          "generationConfig": {"maxOutputTokens": 10}}
+                          "generationConfig": {"maxOutputTokens": 20}}
                 )
                 data = resp.json()
-                text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "WAIT").strip().upper()
+                text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "WAIT:0").strip().upper()
 
-        if "BUY_UP" in text:
+        # Parse SIGNAL:CONFIDENCE format
+        confidence = 0
+        if ":" in text:
+            parts = text.split(":")
+            raw_signal = parts[0].strip()
+            try:
+                confidence = max(0, min(100, int(parts[1].strip())))
+            except Exception:
+                confidence = 50
+        else:
+            raw_signal = text
+
+        if "BUY_UP" in raw_signal:
             signal = "BUY_UP"
-        elif "BUY_DOWN" in text:
+        elif "BUY_DOWN" in raw_signal:
             signal = "BUY_DOWN"
         else:
             signal = "WAIT"
+            confidence = 0
 
         ai_last_signal = signal
+        ai_last_confidence = confidence
         ai_last_signal_time = now
-        print(f"[AI] Signal: {signal} (model={ai_model})")
+        print(f"[AI] Signal: {signal} ({confidence}%) model={ai_model}")
         return signal
     except Exception as e:
         print(f"[AI] Error: {e}")
-        return ai_last_signal  # keep last signal on error
+        return ai_last_signal
 
 
 async def broadcast_state():
@@ -930,6 +946,7 @@ async def broadcast_state():
                 "enabled": ai_agent_enabled,
                 "model": ai_model,
                 "last_signal": ai_last_signal,
+                "confidence": ai_last_confidence,
                 "has_key": bool(ai_api_key)
             }
         }
@@ -1812,7 +1829,7 @@ async def websocket_endpoint(websocket: WebSocket):
             cmd = json.loads(data)
             action = cmd.get("action")
             
-            global portfolio, active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing, active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7, active_strategy_cpt, active_strategy_claude, strategy_a_strikes, global_profit_target, live_mode_enabled, live_token_ids, strategy_stats, ai_agent_enabled, ai_model, ai_api_key, ai_last_signal, ai_last_signal_time
+            global portfolio, active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing, active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7, active_strategy_cpt, active_strategy_claude, strategy_a_strikes, global_profit_target, live_mode_enabled, live_token_ids, strategy_stats, ai_agent_enabled, ai_model, ai_api_key, ai_last_signal, ai_last_confidence, ai_last_signal_time
             current_portfolio = live_portfolio if live_mode_enabled else paper_portfolio
             portfolio = current_portfolio
             if action == "BUY_UP":
