@@ -1883,8 +1883,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     paper_portfolio.cash_out(market.up_price, market.down_price)
                     live_portfolio.cash_out(market.up_price, market.down_price)
             elif action == "SYNC_LIVE_GAMMA":
-                market.up_price = cmd.get("up_price", 50)
-                market.down_price = cmd.get("down_price", 50)
+                _up = cmd.get("up_price", 50)
+                _dn = cmd.get("down_price", 50)
+                # Apply same stale filter as backend poll — reject settlement/thin-book prices
+                if not (_up <= 5 or _dn <= 5 or _up >= 95 or _dn >= 95):
+                    market.up_price = _up
+                    market.down_price = _dn
                 title = cmd.get("title", "Live Market")
                 
                 target_p = cmd.get("target_price", 0)

@@ -366,14 +366,18 @@ function App() {
                   }
                 }
 
-                ws.send(JSON.stringify({
-                  action: "SYNC_LIVE_GAMMA",
-                  up_price: upPrice,
-                  down_price: downPrice,
-                  title: event.title,
-                  target_price: targetPrice,
-                  time_remaining: timeRemainingSeconds
-                }));
+                // Reject stale/settlement prices (≤5¢ or ≥95¢) — same guard as backend
+                const isStale = upPrice <= 5 || downPrice <= 5 || upPrice >= 95 || downPrice >= 95;
+                if (!isStale) {
+                  ws.send(JSON.stringify({
+                    action: "SYNC_LIVE_GAMMA",
+                    up_price: upPrice,
+                    down_price: downPrice,
+                    title: event.title,
+                    target_price: targetPrice,
+                    time_remaining: timeRemainingSeconds
+                  }));
+                }
                 break;
               }
             }
