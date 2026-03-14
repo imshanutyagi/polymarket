@@ -1014,12 +1014,14 @@ async def market_loop():
                 
                 if active_strategy_c_trailing or active_strategy_cpt or active_strategy_claude:
                     # Time-Decaying Profit Target
-                    dynamic_target = 0.90
-                    if time_left <= 300:   # last 5 min: take $0.50+
+                    if time_left <= 300:        # last 5 min
                         dynamic_target = 0.50
-                    elif time_left <= 600: # last 10 min: take $0.70+
+                    elif time_left <= 600:      # last 10 min
                         dynamic_target = 0.70
-                    # 10-15 min: keep $1.00 (normal target)
+                    elif time_left <= 1800:     # last 30 min
+                        dynamic_target = 0.90
+                    else:                       # first 30 min
+                        dynamic_target = 1.00
 
                     # Only update peak when prices are valid — flickered 1c/99c would
                     # inflate peak_profit and cause the trailing stop to exit at $0
