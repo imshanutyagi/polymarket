@@ -839,6 +839,22 @@ async def get_ai_signal(force: bool = False) -> str:
         elif recent[-1] < recent[0] - 2:
             trend_str = "falling"
 
+    # Price entry limits based on time remaining (less time = stricter price limit)
+    if time_left_min > 45:
+        max_entry = 78
+    elif time_left_min > 30:
+        max_entry = 72
+    elif time_left_min > 15:
+        max_entry = 65
+    elif time_left_min > 5:
+        max_entry = 55
+    else:
+        max_entry = 0  # Don't enter last 5 min
+
+    # Suggested trade size
+    bal = portfolio.balance
+    suggested_dollars = round(min(10.0, max(2.0, bal * 0.25)), 2)
+
     prompt = (
         f"You are a Polymarket scalping bot trading BTC Up/Down binary options.\n\n"
         f"Market snapshot:\n"
@@ -847,12 +863,16 @@ async def get_ai_signal(force: bool = False) -> str:
         f"- DOWN token price: {market.down_price}¢ (probability BTC ends BELOW ${market.price_to_beat:.0f})\n"
         f"- UP price trend: {trend_str}\n"
         f"- Recent UP prices (oldest→newest): {prices_str}\n\n"
-        f"Trading logic:\n"
-        f"- BUY_UP: trend is rising, OR UP price > 55¢, OR BTC is above target and likely to stay\n"
-        f"- BUY_DOWN: trend is falling, OR UP price < 45¢, OR BTC is below target and falling\n"
-        f"- WAIT: ONLY if < 5 minutes left or both sides are exactly equal with zero trend\n"
-        f"- YOU MUST pick BUY_UP or BUY_DOWN in almost all cases. WAIT is a last resort.\n"
-        f"- Near 50/50? Pick the direction the trend favors. No trend? BUY_UP if BTC is above target.\n\n"
+        f"Trade parameters:\n"
+        f"- Available balance: ${bal:.2f}\n"
+        f"- Suggested order size: ${suggested_dollars:.2f}\n"
+        f"- Max entry price: {max_entry}¢ (do NOT buy if token costs more — insufficient time for profit)\n\n"
+        f"Trading rules:\n"
+        f"- BUY_UP: trend rising OR UP price > 55¢ AND up_price <= {max_entry}¢\n"
+        f"- BUY_DOWN: trend falling OR UP price < 45¢ AND down_price <= {max_entry}¢\n"
+        f"- WAIT: only if time < 5 min, OR chosen token price exceeds {max_entry}¢\n"
+        f"- Near 50/50 with flat trend → pick BUY_UP if BTC above target, else BUY_DOWN\n"
+        f"- Be decisive: WAIT is only valid when entry price is too high for time remaining.\n\n"
         f"Reply with ONLY: SIGNAL:CONFIDENCE (no explanation)\n"
         f"SIGNAL = BUY_UP, BUY_DOWN, or WAIT. CONFIDENCE = 0-100.\n"
         f"Examples: BUY_UP:70  or  BUY_DOWN:65  or  WAIT:20"
@@ -978,7 +998,7 @@ async def run_ai_agent():
                 continue
 
             if ai_agent_state == "observing":
-                # Query every 15 sec — enter immediately if signal found with ≥40% confidence
+                # Query every 15 sec — enter the moment AI confirms a signal
                 if now - ai_last_query_time >= 15:
                     signal = await get_ai_signal(force=True)
                     ai_last_query_time = now
@@ -988,41 +1008,22 @@ async def run_ai_agent():
                         await ai_direct_buy(direction)
                         ai_agent_state = "holding"
                         print(f"[AI-AGENT] Entered {direction.upper()} at {elapsed}s (conf={ai_last_confidence}%)")
-                    elif now - ai_observe_start >= AI_OBSERVE_SECONDS:
-                        # 2-min max reached — force entry on any directional signal
-                        if signal in ("BUY_UP", "BUY_DOWN"):
-                            direction = "up" if signal == "BUY_UP" else "down"
-                            await ai_direct_buy(direction)
-                            ai_agent_state = "holding"
-                            print(f"[AI-AGENT] Force-entered {direction.upper()} at 2-min max (conf={ai_last_confidence}%)")
-                        else:
-                            print("[AI-AGENT] 2-min max: still WAIT — restarting scan")
-                            ai_observe_start = now
                     else:
-                        print(f"[AI-AGENT] Observing ({elapsed}s): {signal} {ai_last_confidence}% — need ≥40% to enter")
+                        print(f"[AI-AGENT] Scanning ({elapsed}s): {signal} {ai_last_confidence}% — waiting for opportunity...")
 
             elif ai_agent_state == "rescanning":
-                elapsed = now - ai_rescan_start
-                # Query every 10 sec — enter immediately if signal found with ≥40% confidence
+                # Query every 10 sec — enter the moment AI confirms a signal
                 if now - ai_last_query_time >= 10:
                     signal = await get_ai_signal(force=True)
                     ai_last_query_time = now
+                    elapsed = round(now - ai_rescan_start)
                     if signal in ("BUY_UP", "BUY_DOWN") and ai_last_confidence >= 40:
                         direction = "up" if signal == "BUY_UP" else "down"
                         await ai_direct_buy(direction)
                         ai_agent_state = "holding"
-                        print(f"[AI-AGENT] Re-entered {direction.upper()} at {round(elapsed)}s into rescan (conf={ai_last_confidence}%)")
-                    elif elapsed >= 40:
-                        # Max 40 sec: force entry on any directional signal, else back to observing
-                        if signal in ("BUY_UP", "BUY_DOWN"):
-                            direction = "up" if signal == "BUY_UP" else "down"
-                            await ai_direct_buy(direction)
-                            ai_agent_state = "holding"
-                            print(f"[AI-AGENT] Force-entered {direction.upper()} at rescan max (conf={ai_last_confidence}%)")
-                        else:
-                            print("[AI-AGENT] No signal after 40s rescan → back to observing")
-                            ai_agent_state = "observing"
-                            ai_observe_start = now
+                        print(f"[AI-AGENT] Re-entered {direction.upper()} at {elapsed}s (conf={ai_last_confidence}%)")
+                    else:
+                        print(f"[AI-AGENT] Rescanning ({elapsed}s): {signal} {ai_last_confidence}% — waiting...")
 
         except Exception as e:
             print(f"[AI-AGENT] Error: {e}")
