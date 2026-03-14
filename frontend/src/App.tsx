@@ -1374,7 +1374,6 @@ function App() {
                     style={{width: '100%', marginBottom: '6px', padding: '4px', background: '#2d3748', color: 'white', border: '1px solid #4a5568', borderRadius: '4px', fontSize: '12px'}}
                   >
                     <option value="claude">Claude Haiku (Anthropic)</option>
-                    <option value="gemini">Gemini Flash (Google)</option>
                   </select>
                   <div style={{display: 'flex', gap: '4px'}}>
                     <input

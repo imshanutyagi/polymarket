@@ -822,22 +822,31 @@ async def get_ai_signal() -> str:
     prices_str = ", ".join([f"{int(p[1])}¢" for p in history[-10:]]) if history else "no data"
     time_left_min = int(market.get_time_left_seconds() / 60)
 
+    # Calculate trend from price history
+    trend_str = "flat"
+    if len(history) >= 3:
+        recent = [p[1] for p in history[-5:]]
+        if recent[-1] > recent[0] + 2:
+            trend_str = "rising"
+        elif recent[-1] < recent[0] - 2:
+            trend_str = "falling"
+
     prompt = (
-        f"You are a Polymarket trading bot. Analyze this Bitcoin Up/Down binary market and give a trading signal.\n\n"
-        f"Market data:\n"
+        f"You are a Polymarket scalping bot trading BTC Up/Down binary options.\n\n"
+        f"Market snapshot:\n"
         f"- Time remaining: {time_left_min} minutes\n"
-        f"- UP price: {market.up_price}¢ (market thinks {market.up_price}% chance BTC ends ABOVE target)\n"
-        f"- DOWN price: {market.down_price}¢ (market thinks {market.down_price}% chance BTC ends BELOW target)\n"
-        f"- BTC target price: ${market.price_to_beat:.2f}\n"
-        f"- Recent UP price trend (last 10 ticks): {prices_str}\n\n"
-        f"Rules:\n"
-        f"- If UP price is trending UP and below 45¢, signal BUY_UP\n"
-        f"- If UP price is trending DOWN and above 55¢, signal BUY_DOWN\n"
-        f"- If trend is unclear or price is between 45-55¢, signal WAIT\n"
-        f"- Be decisive. Only WAIT if truly no edge.\n\n"
-        f"Reply with ONLY this format (no explanation): SIGNAL:CONFIDENCE\n"
+        f"- UP token price: {market.up_price}¢ (probability BTC ends ABOVE ${market.price_to_beat:.0f})\n"
+        f"- DOWN token price: {market.down_price}¢ (probability BTC ends BELOW ${market.price_to_beat:.0f})\n"
+        f"- UP price trend: {trend_str}\n"
+        f"- Recent UP prices (oldest→newest): {prices_str}\n\n"
+        f"Trading logic:\n"
+        f"- BUY_UP: UP trend is rising OR UP price > 60¢ with time to hold (momentum play)\n"
+        f"- BUY_DOWN: UP trend is falling OR UP price < 40¢ with time to hold (DOWN token gaining)\n"
+        f"- WAIT: trend is flat/unclear, price near 50¢, or < 5 minutes left\n"
+        f"- Be DECISIVE. At 75¢ rising = BUY_UP. At 25¢ falling = BUY_DOWN. Only WAIT if genuinely uncertain.\n\n"
+        f"Reply with ONLY: SIGNAL:CONFIDENCE (no explanation)\n"
         f"SIGNAL = BUY_UP, BUY_DOWN, or WAIT. CONFIDENCE = 0-100.\n"
-        f"Example: BUY_DOWN:72"
+        f"Examples: BUY_UP:80  or  BUY_DOWN:65  or  WAIT:30"
     )
 
     try:
