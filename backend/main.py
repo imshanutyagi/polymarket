@@ -733,6 +733,7 @@ cycle_warmup_until = 0.0  # No warmup
 
 # Token IDs for the current live market (loaded from tokens.json or via CLOB lookup)
 live_token_ids = {"up": "", "down": ""}
+clob_last_update_time = 0.0  # Unix timestamp of last successful CLOB price update
 try:
     with open("tokens.json", "r") as f:
         tokens = json.load(f)
@@ -932,6 +933,11 @@ async def get_ai_signal(force: bool = False) -> str:
 async def ai_direct_buy(direction: str):
     """AI agent places a direct buy into the active portfolio."""
     global portfolio
+    # Require fresh CLOB prices — don't trade on stale/Gamma prices
+    clob_age = time.time() - clob_last_update_time
+    if clob_last_update_time == 0.0 or clob_age > 30:
+        print(f"[AI-AGENT] Blocked: CLOB prices not fresh (last update {clob_age:.0f}s ago) — waiting for real prices")
+        return
     # Respect the cycle profit target — stop trading once it's hit
     if portfolio.cycle_profit >= global_profit_target:
         print(f"[AI-AGENT] Cycle target ${global_profit_target:.2f} reached (profit=${portfolio.cycle_profit:.2f}) — no new entries")
@@ -1076,6 +1082,8 @@ async def broadcast_state():
                 "is_live": market.is_live,
                 "live_slug": market.live_slug,
                 "warmup_seconds_left": max(0, round(cycle_warmup_until - time.time())),
+                "prices_fresh": clob_last_update_time > 0 and (time.time() - clob_last_update_time) <= 30,
+                "clob_price_age": round(time.time() - clob_last_update_time) if clob_last_update_time > 0 else -1,
             },
             "portfolio": {
                 "balance": portfolio.balance,
@@ -1162,7 +1170,7 @@ async def sync_live_balance():
 async def market_loop():
     global active_strategy_a, active_strategy_b, active_strategy_claude
     global strategy_a_strikes, strategy_b_trade_done, strategy_a_done
-    global cycle_warmup_until, ai_agent_state
+    global cycle_warmup_until, ai_agent_state, clob_last_update_time
 
     while True:
         global portfolio
@@ -1186,6 +1194,7 @@ async def market_loop():
                 scalper_6.reset_state()
                 claude_strategy.reset_state(full_reset=True)
                 market.prices_loaded = False  # Force wait for fresh prices on new cycle
+                clob_last_update_time = 0.0   # Reset CLOB freshness guard — must get new CLOB price before trading
                 asyncio.create_task(cancel_all_open_orders())  # Cancel stale GTC/resting orders
                 # Reset AI agent to start fresh observation on new cycle
                 ai_agent_state = "idle"
@@ -1798,7 +1807,7 @@ async def stream_live_prices():
 
 async def auto_discover_market():
     """Automatically discover and sync with the current Polymarket BTC Up/Down market."""
-    global live_token_ids
+    global live_token_ids, clob_last_update_time
     
     while True:
         try:
@@ -1816,6 +1825,7 @@ async def auto_discover_market():
                 market.live_slug = ""
                 live_token_ids.clear()
                 market.prices_loaded = False  # Block trading until new market prices confirmed
+                clob_last_update_time = 0.0   # Must get fresh CLOB price before AI can trade
 
             now_secs = int(time.time())
             from datetime import timezone, timedelta
@@ -1918,7 +1928,8 @@ async def auto_discover_market():
             await asyncio.sleep(15)
 
 async def _poll_live_prices():
-    """Poll CLOB order book for live price updates using official py-clob-client. ALL pricing from Polymarket only."""
+    """Poll CLOB order book for live price updates. ALL pricing from Polymarket CLOB only."""
+    global clob_last_update_time
     try:
         slug = market.live_slug
         if not slug:
@@ -1927,11 +1938,13 @@ async def _poll_live_prices():
         up_token = live_token_ids.get("up", "")
         down_token = live_token_ids.get("down", "")
 
-        # Use CLOB best ask for accurate prices — no auth required for reading order book
+        # Use CLOB best ask for accurate prices — fetch both concurrently for speed
         if up_token and down_token:
             async with httpx.AsyncClient(timeout=5.0) as hclient:
-                up_resp = await hclient.get(f"https://clob.polymarket.com/book?token_id={up_token}")
-                dn_resp = await hclient.get(f"https://clob.polymarket.com/book?token_id={down_token}")
+                up_resp, dn_resp = await asyncio.gather(
+                    hclient.get(f"https://clob.polymarket.com/book?token_id={up_token}"),
+                    hclient.get(f"https://clob.polymarket.com/book?token_id={down_token}"),
+                )
             up_data = up_resp.json() if up_resp.status_code == 200 else {}
             dn_data = dn_resp.json() if dn_resp.status_code == 200 else {}
             up_asks = up_data.get("asks", [])
@@ -1947,7 +1960,8 @@ async def _poll_live_prices():
                     market.down_price = dn_val
                     market.prices_loaded = True
                     market.current_price = market.up_price
-                    now = time.time()
+                    clob_last_update_time = time.time()
+                    now = clob_last_update_time
                     market.history.append((now, market.up_price))
                     market.history = [h for h in market.history if now - h[0] <= 300]
                     print(f"[CLOB] UP={market.up_price}¢ DOWN={market.down_price}¢")
@@ -2001,7 +2015,7 @@ async def websocket_endpoint(websocket: WebSocket):
             cmd = json.loads(data)
             action = cmd.get("action")
             
-            global portfolio, active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing, active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7, active_strategy_cpt, active_strategy_claude, strategy_a_strikes, global_profit_target, live_mode_enabled, live_token_ids, strategy_stats, ai_agent_enabled, ai_model, ai_api_key, ai_last_signal, ai_last_confidence, ai_last_signal_time
+            global portfolio, active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing, active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7, active_strategy_cpt, active_strategy_claude, strategy_a_strikes, global_profit_target, live_mode_enabled, live_token_ids, strategy_stats, ai_agent_enabled, ai_model, ai_api_key, ai_last_signal, ai_last_confidence, ai_last_signal_time, clob_last_update_time
             current_portfolio = live_portfolio if live_mode_enabled else paper_portfolio
             portfolio = current_portfolio
             if action == "BUY_UP":

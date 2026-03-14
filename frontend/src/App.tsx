@@ -11,6 +11,10 @@ interface MarketData {
   up_price: number;
   down_price: number;
   warmup_seconds_left?: number;
+  prices_fresh?: boolean;
+  clob_price_age?: number;
+  is_live?: boolean;
+  live_slug?: string;
 }
 
 interface PortfolioData {
@@ -765,6 +769,18 @@ function App() {
               <Clock className="w-4 h-4 shrink-0" />
               Warming up — waiting for price data to settle before trading.&nbsp;
               <span className="font-mono font-bold">{market.warmup_seconds_left}s remaining</span>
+            </div>
+          )}
+
+          {market.is_live && market.prices_fresh === false && (
+            <div className="bg-red-950 border border-red-700 p-3 rounded-xl flex items-center gap-3 text-red-300 text-sm font-medium">
+              <Clock className="w-4 h-4 shrink-0 animate-pulse" />
+              Syncing real prices from Polymarket...&nbsp;
+              {(market.clob_price_age ?? -1) >= 0
+                ? <span className="font-mono font-bold">Last update: {market.clob_price_age}s ago</span>
+                : <span className="font-mono font-bold">No CLOB data yet</span>
+              }
+              &nbsp;— Trading blocked until prices are confirmed.
             </div>
           )}
 
