@@ -976,45 +976,46 @@ async def run_ai_agent():
                 continue
 
             if ai_agent_state == "observing":
-                elapsed = now - ai_observe_start
-                # Query every 30 sec to warm up signal
+                # Query every 30 sec — enter IMMEDIATELY if good signal found
                 if now - ai_last_query_time >= 30:
-                    await get_ai_signal(force=True)
-                    ai_last_query_time = now
-
-                if elapsed >= AI_OBSERVE_SECONDS:
                     signal = await get_ai_signal(force=True)
                     ai_last_query_time = now
                     if signal in ("BUY_UP", "BUY_DOWN") and ai_last_confidence >= 55:
                         direction = "up" if signal == "BUY_UP" else "down"
                         await ai_direct_buy(direction)
                         ai_agent_state = "holding"
-                        print(f"[AI-AGENT] Entered {direction.upper()} after 2-min observation (conf={ai_last_confidence}%)")
+                        elapsed = round(now - ai_observe_start)
+                        print(f"[AI-AGENT] Entered {direction.upper()} at {elapsed}s into observation (conf={ai_last_confidence}%)")
                     else:
-                        print(f"[AI-AGENT] Signal={signal} conf={ai_last_confidence}% — retrying in 30s")
-                        ai_observe_start = now - (AI_OBSERVE_SECONDS - 30)
+                        elapsed = round(now - ai_observe_start)
+                        print(f"[AI-AGENT] Observing ({elapsed}s): {signal} {ai_last_confidence}% — waiting for better signal...")
+                        # Max 2 min: if still no signal, reset scan
+                        if now - ai_observe_start >= AI_OBSERVE_SECONDS:
+                            print("[AI-AGENT] 2-min max reached with no entry — restarting scan")
+                            ai_observe_start = now
 
             elif ai_agent_state == "rescanning":
                 elapsed = now - ai_rescan_start
-                # Query every 10 sec during quick rescan
+                # Query every 10 sec — enter IMMEDIATELY if good signal found
                 if now - ai_last_query_time >= 10:
-                    await get_ai_signal(force=True)
-                    ai_last_query_time = now
-
-                if elapsed >= 20:
                     signal = await get_ai_signal(force=True)
                     ai_last_query_time = now
-                    enter = signal in ("BUY_UP", "BUY_DOWN") and ai_last_confidence >= 55
-                    force_entry = elapsed >= 40 and signal in ("BUY_UP", "BUY_DOWN")
-                    if enter or force_entry:
+                    if signal in ("BUY_UP", "BUY_DOWN") and ai_last_confidence >= 55:
                         direction = "up" if signal == "BUY_UP" else "down"
                         await ai_direct_buy(direction)
                         ai_agent_state = "holding"
-                        print(f"[AI-AGENT] Re-entered {direction.upper()} after quick rescan (conf={ai_last_confidence}%)")
+                        print(f"[AI-AGENT] Re-entered {direction.upper()} at {round(elapsed)}s into rescan (conf={ai_last_confidence}%)")
                     elif elapsed >= 40:
-                        print("[AI-AGENT] No signal after rescan → back to observing (30s)")
-                        ai_agent_state = "observing"
-                        ai_observe_start = now - (AI_OBSERVE_SECONDS - 30)
+                        # Max 40 sec: force entry on any directional signal, else back to observing
+                        if signal in ("BUY_UP", "BUY_DOWN"):
+                            direction = "up" if signal == "BUY_UP" else "down"
+                            await ai_direct_buy(direction)
+                            ai_agent_state = "holding"
+                            print(f"[AI-AGENT] Force-entered {direction.upper()} at rescan max (conf={ai_last_confidence}%)")
+                        else:
+                            print("[AI-AGENT] No signal after 40s rescan → back to observing")
+                            ai_agent_state = "observing"
+                            ai_observe_start = now
 
         except Exception as e:
             print(f"[AI-AGENT] Error: {e}")
