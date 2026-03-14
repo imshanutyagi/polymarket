@@ -1617,69 +1617,62 @@ async def auto_discover_market():
 async def _poll_live_prices():
     """Poll CLOB order book for live price updates using official py-clob-client. ALL pricing from Polymarket only."""
     try:
+        slug = market.live_slug
+        if not slug:
+            return
+
         up_token = live_token_ids.get("up", "")
         down_token = live_token_ids.get("down", "")
 
-        # Paper-trading mode (no token IDs): poll Gamma API for prices instead
-        if not up_token or not down_token:
-            slug = market.live_slug
-            if not slug:
-                return
-            async with httpx.AsyncClient(timeout=8.0) as hclient:
-                resp = await hclient.get(f"https://gamma-api.polymarket.com/events?slug={slug}")
-            data = resp.json() if resp.status_code == 200 else []
-            if data and len(data) > 0:
-                for m in data[0].get("markets", []):
-                    if not m.get("closed") and m.get("active"):
-                        outcomes = json.loads(m.get("outcomes", "[]"))
-                        prices   = json.loads(m.get("outcomePrices", "[]"))
-                        yes_idx  = next((i for i, o in enumerate(outcomes) if o.lower() in ("yes","up","above")), -1)
-                        no_idx   = next((i for i, o in enumerate(outcomes) if o.lower() in ("no","down","below")), -1)
-                        if yes_idx != -1 and no_idx != -1 and len(prices) > max(yes_idx, no_idx):
-                            up_val = max(1, min(99, round(float(prices[yes_idx]) * 100)))
-                            dn_val = max(1, min(99, round(float(prices[no_idx])  * 100)))
-                            is_stale = (up_val <= 5 or dn_val <= 5 or up_val >= 95 or dn_val >= 95)
-                            if not is_stale:
-                                market.up_price   = up_val
-                                market.down_price = dn_val
-                                market.prices_loaded = True
-                            market.current_price = market.up_price
-                            now = time.time()
-                            market.history.append((now, market.up_price))
-                            market.history = [h for h in market.history if now - h[0] <= 300]
-                            print(f"[GAMMA] UP={market.up_price}¢ DOWN={market.down_price}¢")
-                        break
-            return
-
-        # Use /midpoint for real-time prices (more current than last-trade-price)
-        async with httpx.AsyncClient(timeout=5.0) as hclient:
-            up_resp = await hclient.get(f"https://clob.polymarket.com/midpoint?token_id={up_token}")
-            dn_resp = await hclient.get(f"https://clob.polymarket.com/midpoint?token_id={down_token}")
-
-        up_data = up_resp.json() if up_resp.status_code == 200 else {}
-        dn_data = dn_resp.json() if dn_resp.status_code == 200 else {}
-
-        # CLOB /midpoint returns {"mid": "0.41"}, not "price"
-        up_raw = up_data.get("mid") or up_data.get("price")
-        dn_raw = dn_data.get("mid") or dn_data.get("price")
-        if up_raw:
-            up_val = max(1, min(99, round(float(up_raw) * 100)))
-            dn_val = max(1, min(99, round(float(dn_raw) * 100))) if dn_raw else market.down_price
-            # Reject stale/thin-book prices: expired or illiquid new market
-            is_stale = (up_val <= 5 or dn_val <= 5 or up_val >= 95 or dn_val >= 95)
-            if not is_stale:
-                market.up_price = up_val
-                if dn_raw:
+        # Live trading mode: use CLOB midpoint (most current, sub-second)
+        if LIVE_TRADING_AVAILABLE and up_token and down_token:
+            async with httpx.AsyncClient(timeout=5.0) as hclient:
+                up_resp = await hclient.get(f"https://clob.polymarket.com/midpoint?token_id={up_token}")
+                dn_resp = await hclient.get(f"https://clob.polymarket.com/midpoint?token_id={down_token}")
+            up_data = up_resp.json() if up_resp.status_code == 200 else {}
+            dn_data = dn_resp.json() if dn_resp.status_code == 200 else {}
+            up_raw = up_data.get("mid") or up_data.get("price")
+            dn_raw = dn_data.get("mid") or dn_data.get("price")
+            if up_raw:
+                up_val = max(1, min(99, round(float(up_raw) * 100)))
+                dn_val = max(1, min(99, round(float(dn_raw) * 100))) if dn_raw else market.down_price
+                is_stale = (up_val <= 5 or dn_val <= 5 or up_val >= 95 or dn_val >= 95)
+                if not is_stale:
+                    market.up_price = up_val
                     market.down_price = dn_val
-                market.prices_loaded = True
+                    market.prices_loaded = True
+                    market.current_price = market.up_price
+                    now = time.time()
+                    market.history.append((now, market.up_price))
+                    market.history = [h for h in market.history if now - h[0] <= 300]
+                    print(f"[CLOB] UP={market.up_price}¢ DOWN={market.down_price}¢")
+                    return
 
-        # Derive current_price from Polymarket token prices (up_price as probability)
-        market.current_price = market.up_price
-        now = time.time()
-        market.history.append((now, market.up_price))
-        market.history = [h for h in market.history if now - h[0] <= 300]
-
-        print(f"[POLY] UP={market.up_price}¢ DOWN={market.down_price}¢")
+        # Paper mode (or CLOB failed): use Gamma API — works without auth, always returns live prices
+        async with httpx.AsyncClient(timeout=8.0) as hclient:
+            resp = await hclient.get(f"https://gamma-api.polymarket.com/events?slug={slug}")
+        data = resp.json() if resp.status_code == 200 else []
+        if data and len(data) > 0:
+            for m in data[0].get("markets", []):
+                if not m.get("closed") and m.get("active"):
+                    outcomes = json.loads(m.get("outcomes", "[]"))
+                    prices   = json.loads(m.get("outcomePrices", "[]"))
+                    yes_idx  = next((i for i, o in enumerate(outcomes) if o.lower() in ("yes","up","above")), -1)
+                    no_idx   = next((i for i, o in enumerate(outcomes) if o.lower() in ("no","down","below")), -1)
+                    if yes_idx != -1 and no_idx != -1 and len(prices) > max(yes_idx, no_idx):
+                        up_val = max(1, min(99, round(float(prices[yes_idx]) * 100)))
+                        dn_val = max(1, min(99, round(float(prices[no_idx])  * 100)))
+                        is_stale = (up_val <= 5 or dn_val <= 5 or up_val >= 95 or dn_val >= 95)
+                        if not is_stale:
+                            market.up_price   = up_val
+                            market.down_price = dn_val
+                            market.prices_loaded = True
+                        market.current_price = market.up_price
+                        now = time.time()
+                        market.history.append((now, market.up_price))
+                        market.history = [h for h in market.history if now - h[0] <= 300]
+                        print(f"[GAMMA] UP={market.up_price}¢ DOWN={market.down_price}¢")
+                    break
 
     except Exception as e:
         print(f"[AUTO] Price poll error: {e}")
