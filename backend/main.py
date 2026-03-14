@@ -850,11 +850,11 @@ async def get_ai_signal(force: bool = False) -> str:
     if not force and now - ai_last_signal_time < AI_SIGNAL_INTERVAL:
         return ai_last_signal  # use cached signal
 
-    history = market.history[-20:] if market.history else []
+    history = market.history[-30:] if market.history else []
     prices_str = ", ".join([f"{int(p[1])}¢" for p in history[-10:]]) if history else "no data"
     time_left_min = int(market.get_time_left_seconds() / 60)
 
-    # Calculate trend from price history
+    # Trend over last 5 prices
     trend_str = "flat"
     if len(history) >= 3:
         recent = [p[1] for p in history[-5:]]
@@ -862,6 +862,61 @@ async def get_ai_signal(force: bool = False) -> str:
             trend_str = "rising"
         elif recent[-1] < recent[0] - 2:
             trend_str = "falling"
+
+    # Trend consistency: how many of last 6 moves go in same direction
+    consistency_str = "unknown"
+    if len(history) >= 7:
+        moves = [history[i+1][1] - history[i][1] for i in range(len(history)-6, len(history)-1)]
+        up_moves = sum(1 for m in moves if m > 0)
+        dn_moves = sum(1 for m in moves if m < 0)
+        if up_moves >= 4:
+            consistency_str = f"strongly rising ({up_moves}/5 up moves)"
+        elif dn_moves >= 4:
+            consistency_str = f"strongly falling ({dn_moves}/5 down moves)"
+        elif up_moves == dn_moves:
+            consistency_str = "choppy/zigzag — no clear direction"
+        else:
+            consistency_str = f"weakly {'rising' if up_moves > dn_moves else 'falling'} ({max(up_moves,dn_moves)}/5)"
+
+    # Price velocity: ¢ change per minute over last 2 min and last 5 min
+    velocity_2m = 0.0
+    velocity_5m = 0.0
+    now_ts = time.time()
+    if len(history) >= 2:
+        pts_2m = [p for p in history if now_ts - p[0] <= 120]
+        pts_5m = [p for p in history if now_ts - p[0] <= 300]
+        if len(pts_2m) >= 2:
+            velocity_2m = round((pts_2m[-1][1] - pts_2m[0][1]) / 2.0, 1)
+        if len(pts_5m) >= 2:
+            velocity_5m = round((pts_5m[-1][1] - pts_5m[0][1]) / 5.0, 1)
+    velocity_str = f"{velocity_2m:+.1f}¢/min (last 2min), {velocity_5m:+.1f}¢/min (last 5min)"
+
+    # Order book pressure: ask vs bid depth ratio
+    if market_ask_liquidity > 0 and market_bid_liquidity > 0:
+        ratio = market_ask_liquidity / max(market_bid_liquidity, 0.01)
+        if ratio > 2:
+            ob_pressure = f"more buyers than sellers (ask depth {ratio:.1f}x bid) — bullish pressure"
+        elif ratio < 0.5:
+            ob_pressure = f"more sellers than buyers (bid depth {1/ratio:.1f}x ask) — bearish pressure"
+        else:
+            ob_pressure = f"balanced order book (ask/bid ratio={ratio:.1f})"
+    else:
+        ob_pressure = "order book pressure: unknown"
+
+    # Breakeven analysis: what price does token need to reach for profit?
+    entry_price_up = market.up_price
+    entry_price_dn = market.down_price
+    breakeven_up = round(entry_price_up + (100 - entry_price_up) * 0.15)  # need ~15% move to profit
+    breakeven_dn = round(entry_price_dn + (100 - entry_price_dn) * 0.15)
+    breakeven_str = f"UP needs to reach ~{breakeven_up}¢+ | DOWN needs to reach ~{breakeven_dn}¢+"
+
+    # Recent settled trades (last 3)
+    recent_trades = []
+    for t in portfolio.history[-3:]:
+        side = t.get('winning_side', '?')
+        profit = round(t.get('payout', 0) - t.get('spent', 0), 2)
+        recent_trades.append(f"{side} ${profit:+.2f}")
+    trades_str = ", ".join(recent_trades) if recent_trades else "no trades yet this cycle"
 
     # Order size tier based on time remaining
     if time_left_min > 40:
@@ -911,34 +966,39 @@ async def get_ai_signal(force: bool = False) -> str:
         liquidity_signal = "spread unknown"
 
     prompt = (
-        f"You are a Polymarket scalping bot. Trade BTC Up/Down binary options with HIGH CONVICTION only.\n\n"
+        f"You are a Polymarket scalping bot. Trade BTC Up/Down binary options with HIGH CONVICTION only.\n"
+        f"Your goal: only trade when multiple signals AGREE. If signals conflict → WAIT.\n\n"
         f"MARKET SNAPSHOT:\n"
         f"- Time remaining: {time_left_min} minutes\n"
         f"- UP token price: {market.up_price}¢  (pays $1 if BTC ends ABOVE ${market.price_to_beat:.0f})\n"
         f"- DOWN token price: {market.down_price}¢  (pays $1 if BTC ends BELOW ${market.price_to_beat:.0f})\n"
-        f"- {btc_vs_target}\n"
-        f"- UP price trend: {trend_str}\n"
-        f"- Recent UP prices (oldest→newest): {prices_str}\n\n"
-        f"MARKET LIQUIDITY & VOLUME:\n"
+        f"- {btc_vs_target}\n\n"
+        f"PRICE ACTION:\n"
+        f"- Recent UP prices (oldest→newest): {prices_str}\n"
+        f"- Trend direction: {trend_str}\n"
+        f"- Trend consistency: {consistency_str}\n"
+        f"- Price velocity: {velocity_str}\n"
+        f"- Breakeven needed: {breakeven_str}\n\n"
+        f"ORDER BOOK & LIQUIDITY:\n"
+        f"- {ob_pressure}\n"
         f"- Bid-ask spread: {spread_str} ({liquidity_signal})\n"
-        f"- Ask-side depth (entry liquidity): {ask_liq_str} USDC available to buy\n"
-        f"- Bid-side depth (exit liquidity): {bid_liq_str} USDC available to sell\n"
-        f"- 24h trading volume: {vol_str} USDC\n"
-        f"- Interpretation: wide spread or thin depth = avoid entry; high volume = more reliable price signal\n\n"
-        f"CURRENT RULES:\n"
-        f"- Your order size this turn: {size_label}\n"
-        f"- Active stop-loss tier: {stop_loss_str}\n"
-        f"- Available balance: ${bal:.2f}\n"
-        f"- Minimum confidence required to trade: {ai_confidence_threshold}%\n"
-        f"- Max entry price allowed: {'disabled (any price)' if ai_max_entry == 0 else str(ai_max_entry) + '¢ per token'}\n\n"
-        f"DECISION LOGIC:\n"
-        f"- WAIT if time_remaining < 5 min (enforced by system — no trade placed anyway)\n"
-        f"- WAIT if the market is near 50/50 AND trend is flat — no edge, don't guess\n"
-        f"- BUY_UP if trend is rising, UP price {'< ' + str(ai_max_entry) + '¢' if ai_max_entry > 0 else 'any price'}, AND BTC is near or above target — strong edge\n"
-        f"- BUY_DOWN if trend is falling, DOWN price {'< ' + str(ai_max_entry) + '¢' if ai_max_entry > 0 else 'any price'}, AND BTC is near or below target — strong edge\n"
-        f"- Only signal BUY if confidence >= {ai_confidence_threshold}. Signal WAIT if no clear edge.\n"
-        f"- Near 50/50 with flat trend: BUY_UP if BTC above target, BUY_DOWN if below — but only if trending.\n"
-        f"- Stop-losses are tight in late game — be especially conservative with <20 min left.\n\n"
+        f"- Ask depth: {ask_liq_str} | Bid depth: {bid_liq_str}\n"
+        f"- 24h volume: {vol_str} USDC\n\n"
+        f"THIS CYCLE SO FAR:\n"
+        f"- Cycle profit: ${portfolio.cycle_profit:+.2f}\n"
+        f"- Recent trades: {trades_str}\n\n"
+        f"RULES:\n"
+        f"- Order size: {size_label} | Stop-loss: {stop_loss_str}\n"
+        f"- Balance: ${bal:.2f} | Min confidence: {ai_confidence_threshold}%\n"
+        f"- Max entry price: {'OFF' if ai_max_entry == 0 else str(ai_max_entry) + '¢'}\n\n"
+        f"DECISION CHECKLIST (all should be true to BUY):\n"
+        f"1. Trend consistency is 'strongly rising/falling' — not choppy\n"
+        f"2. Velocity confirms direction (positive for UP, negative for DOWN)\n"
+        f"3. Order book pressure agrees (more buyers for UP, more sellers for DOWN)\n"
+        f"4. BTC position supports outcome (above target for UP, below for DOWN)\n"
+        f"5. Token price is below max entry and breakeven is reachable in time remaining\n"
+        f"6. If recent trades are losses → raise your bar, be more selective\n"
+        f"→ If 3 or fewer conditions are met → WAIT. Only trade when 4-5 align.\n\n"
         f"Reply with ONLY: SIGNAL:CONFIDENCE (no explanation)\n"
         f"SIGNAL = BUY_UP, BUY_DOWN, or WAIT. CONFIDENCE = 0-100.\n"
         f"Examples: BUY_UP:70  or  BUY_DOWN:65  or  WAIT:20"
