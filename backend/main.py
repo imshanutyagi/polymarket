@@ -743,6 +743,13 @@ cycle_warmup_until = 0.0  # No warmup
 # Token IDs for the current live market (loaded from tokens.json or via CLOB lookup)
 live_token_ids = {"up": "", "down": ""}
 clob_last_update_time = 0.0  # Unix timestamp of last successful CLOB price update
+
+# Market depth / liquidity data (updated each CLOB poll)
+market_ask_liquidity  = 0.0   # total USDC available to BUY on best ask (how easy to enter)
+market_bid_liquidity  = 0.0   # total USDC available to SELL on best bid (how easy to exit)
+market_spread_cents   = 0.0   # bid-ask spread in cents (tight = liquid, wide = illiquid)
+market_volume_24h     = 0.0   # 24h trading volume in USDC (from Gamma API)
+market_volume_updated = 0.0   # timestamp of last volume fetch
 try:
     with open("tokens.json", "r") as f:
         tokens = json.load(f)
@@ -879,6 +886,23 @@ async def get_ai_signal(force: bool = False) -> str:
     except Exception:
         btc_vs_target = "BTC position vs target: unknown"
 
+    # Liquidity / market health context
+    spread_str = f"{market_spread_cents}¢" if market_spread_cents > 0 else "unknown"
+    ask_liq_str = f"${market_ask_liquidity:,.0f}" if market_ask_liquidity > 0 else "unknown"
+    bid_liq_str = f"${market_bid_liquidity:,.0f}" if market_bid_liquidity > 0 else "unknown"
+    vol_str = f"${market_volume_24h:,.0f}" if market_volume_24h > 0 else "unknown"
+
+    # Liquidity signal for AI
+    if market_spread_cents > 0:
+        if market_spread_cents <= 2:
+            liquidity_signal = "tight spread — highly liquid, easy to enter/exit"
+        elif market_spread_cents <= 5:
+            liquidity_signal = "moderate spread — reasonable liquidity"
+        else:
+            liquidity_signal = "wide spread — illiquid market, be cautious"
+    else:
+        liquidity_signal = "spread unknown"
+
     prompt = (
         f"You are a Polymarket scalping bot. Trade BTC Up/Down binary options with HIGH CONVICTION only.\n\n"
         f"MARKET SNAPSHOT:\n"
@@ -888,6 +912,12 @@ async def get_ai_signal(force: bool = False) -> str:
         f"- {btc_vs_target}\n"
         f"- UP price trend: {trend_str}\n"
         f"- Recent UP prices (oldest→newest): {prices_str}\n\n"
+        f"MARKET LIQUIDITY & VOLUME:\n"
+        f"- Bid-ask spread: {spread_str} ({liquidity_signal})\n"
+        f"- Ask-side depth (entry liquidity): {ask_liq_str} USDC available to buy\n"
+        f"- Bid-side depth (exit liquidity): {bid_liq_str} USDC available to sell\n"
+        f"- 24h trading volume: {vol_str} USDC\n"
+        f"- Interpretation: wide spread or thin depth = avoid entry; high volume = more reliable price signal\n\n"
         f"CURRENT RULES:\n"
         f"- Your order size this turn: {size_label}\n"
         f"- Active stop-loss tier: {stop_loss_str}\n"
@@ -992,7 +1022,12 @@ async def ai_direct_buy(direction: str) -> bool:
         ai_block_reason = f"Market near-settled ({market.up_price}¢/{market.down_price}¢) — no edge"
         print(f"[AI-AGENT] Blocked: {ai_block_reason}")
         return False
-    # Hard stop 3: cycle profit target hit — stop trading this cycle
+    # Hard stop 3: spread too wide — illiquid market, slippage risk
+    if market_spread_cents > 0 and market_spread_cents > 8:
+        ai_block_reason = f"Wide spread ({market_spread_cents}¢) — illiquid, skip entry"
+        print(f"[AI-AGENT] Blocked: {ai_block_reason}")
+        return False
+    # Hard stop 4: cycle profit target hit — stop trading this cycle
     if portfolio.cycle_profit >= global_profit_target:
         ai_block_reason = f"Cycle profit target ${global_profit_target:.2f} reached"
         print(f"[AI-AGENT] Blocked: {ai_block_reason} (profit=${portfolio.cycle_profit:.2f})")
@@ -2033,7 +2068,7 @@ async def auto_discover_market():
 
 async def _poll_live_prices():
     """Poll CLOB order book for live price updates. ALL pricing from Polymarket CLOB only."""
-    global clob_last_update_time
+    global clob_last_update_time, market_ask_liquidity, market_bid_liquidity, market_spread_cents, market_volume_24h, market_volume_updated
     try:
         slug = market.live_slug
         if not slug:
@@ -2068,7 +2103,41 @@ async def _poll_live_prices():
                     now = clob_last_update_time
                     market.history.append((now, market.up_price))
                     market.history = [h for h in market.history if now - h[0] <= 300]
-                    print(f"[CLOB] UP={market.up_price}¢ DOWN={market.down_price}¢")
+                    # --- Extract liquidity/spread from order book ---
+                    try:
+                        up_bids = up_data.get("bids", [])
+                        # Ask liquidity: total USDC size at best ask level (UP token)
+                        best_ask_price = up_raw
+                        ask_liq = sum(float(a["size"]) for a in up_asks if abs(float(a["price"]) - best_ask_price) < 0.01)
+                        market_ask_liquidity = round(ask_liq * best_ask_price, 2)
+                        # Bid liquidity: total USDC size at best bid level (UP token)
+                        if up_bids:
+                            best_bid_price = max(float(b["price"]) for b in up_bids)
+                            bid_liq = sum(float(b["size"]) for b in up_bids if abs(float(b["price"]) - best_bid_price) < 0.01)
+                            market_bid_liquidity = round(bid_liq * best_bid_price, 2)
+                            market_spread_cents = round((best_ask_price - best_bid_price) * 100, 1)
+                        else:
+                            market_bid_liquidity = 0.0
+                            market_spread_cents = 0.0
+                    except Exception:
+                        pass
+                    print(f"[CLOB] UP={market.up_price}¢ DOWN={market.down_price}¢ | spread={market_spread_cents}¢ ask_liq=${market_ask_liquidity} bid_liq=${market_bid_liquidity}")
+
+            # Fetch 24h volume from Gamma once every 5 minutes
+            if time.time() - market_volume_updated > 300:
+                try:
+                    async with httpx.AsyncClient(timeout=5.0) as hclient:
+                        vol_resp = await hclient.get(f"https://gamma-api.polymarket.com/events?slug={slug}")
+                    if vol_resp.status_code == 200:
+                        vol_data = vol_resp.json()
+                        if vol_data and isinstance(vol_data, list) and len(vol_data) > 0:
+                            raw_vol = vol_data[0].get("volume", 0)
+                            market_volume_24h = float(raw_vol) if raw_vol else 0.0
+                            market_volume_updated = time.time()
+                            print(f"[GAMMA] 24h volume=${market_volume_24h:,.0f}")
+                except Exception:
+                    pass
+
             # CLOB had token IDs — don't fall back to Gamma (which returns stale mid-prices)
             return
 
