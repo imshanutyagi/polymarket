@@ -976,12 +976,23 @@ async def get_ai_signal(force: bool = False) -> str:
 async def ai_direct_buy(direction: str) -> bool:
     """AI agent places a direct buy with time-based order size limits."""
     global portfolio, ai_block_reason, position_entry_time, position_entry_time_left_min
-    # Hard stop 1: no CLOB price yet — would trade on fake Gamma 50/50 prices
+    # Hard stop 1: no CLOB price yet, or price is stale (>60s) — banner is red
+    clob_age = time.time() - clob_last_update_time if clob_last_update_time > 0 else float('inf')
     if clob_last_update_time == 0.0:
         ai_block_reason = "Waiting for CLOB price confirmation"
         print(f"[AI-AGENT] Blocked: {ai_block_reason}")
         return False
-    # Hard stop 2: cycle profit target hit — stop trading this cycle
+    if clob_age > 60:
+        ai_block_reason = f"Prices stale ({int(clob_age)}s ago) — waiting for fresh CLOB data"
+        print(f"[AI-AGENT] Blocked: {ai_block_reason}")
+        return False
+    # Hard stop 2: market near-settled — one side < 8¢ means no edge left
+    min_price = min(market.up_price, market.down_price)
+    if min_price < 8:
+        ai_block_reason = f"Market near-settled ({market.up_price}¢/{market.down_price}¢) — no edge"
+        print(f"[AI-AGENT] Blocked: {ai_block_reason}")
+        return False
+    # Hard stop 3: cycle profit target hit — stop trading this cycle
     if portfolio.cycle_profit >= global_profit_target:
         ai_block_reason = f"Cycle profit target ${global_profit_target:.2f} reached"
         print(f"[AI-AGENT] Blocked: {ai_block_reason} (profit=${portfolio.cycle_profit:.2f})")
