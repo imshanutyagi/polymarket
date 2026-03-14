@@ -848,13 +848,14 @@ async def get_ai_signal(force: bool = False) -> str:
         f"- UP price trend: {trend_str}\n"
         f"- Recent UP prices (oldest→newest): {prices_str}\n\n"
         f"Trading logic:\n"
-        f"- BUY_UP: UP trend is rising OR UP price > 60¢ with time to hold (momentum play)\n"
-        f"- BUY_DOWN: UP trend is falling OR UP price < 40¢ with time to hold (DOWN token gaining)\n"
-        f"- WAIT: trend is flat/unclear, price near 50¢, or < 5 minutes left\n"
-        f"- Be DECISIVE. At 75¢ rising = BUY_UP. At 25¢ falling = BUY_DOWN. Only WAIT if genuinely uncertain.\n\n"
+        f"- BUY_UP: trend is rising, OR UP price > 55¢, OR BTC is above target and likely to stay\n"
+        f"- BUY_DOWN: trend is falling, OR UP price < 45¢, OR BTC is below target and falling\n"
+        f"- WAIT: ONLY if < 5 minutes left or both sides are exactly equal with zero trend\n"
+        f"- YOU MUST pick BUY_UP or BUY_DOWN in almost all cases. WAIT is a last resort.\n"
+        f"- Near 50/50? Pick the direction the trend favors. No trend? BUY_UP if BTC is above target.\n\n"
         f"Reply with ONLY: SIGNAL:CONFIDENCE (no explanation)\n"
         f"SIGNAL = BUY_UP, BUY_DOWN, or WAIT. CONFIDENCE = 0-100.\n"
-        f"Examples: BUY_UP:80  or  BUY_DOWN:65  or  WAIT:30"
+        f"Examples: BUY_UP:70  or  BUY_DOWN:65  or  WAIT:20"
     )
 
     try:
@@ -976,31 +977,36 @@ async def run_ai_agent():
                 continue
 
             if ai_agent_state == "observing":
-                # Query every 30 sec — enter IMMEDIATELY if good signal found
+                # Query every 30 sec — enter immediately if signal found with ≥40% confidence
                 if now - ai_last_query_time >= 30:
                     signal = await get_ai_signal(force=True)
                     ai_last_query_time = now
-                    if signal in ("BUY_UP", "BUY_DOWN") and ai_last_confidence >= 55:
+                    elapsed = round(now - ai_observe_start)
+                    if signal in ("BUY_UP", "BUY_DOWN") and ai_last_confidence >= 40:
                         direction = "up" if signal == "BUY_UP" else "down"
                         await ai_direct_buy(direction)
                         ai_agent_state = "holding"
-                        elapsed = round(now - ai_observe_start)
-                        print(f"[AI-AGENT] Entered {direction.upper()} at {elapsed}s into observation (conf={ai_last_confidence}%)")
-                    else:
-                        elapsed = round(now - ai_observe_start)
-                        print(f"[AI-AGENT] Observing ({elapsed}s): {signal} {ai_last_confidence}% — waiting for better signal...")
-                        # Max 2 min: if still no signal, reset scan
-                        if now - ai_observe_start >= AI_OBSERVE_SECONDS:
-                            print("[AI-AGENT] 2-min max reached with no entry — restarting scan")
+                        print(f"[AI-AGENT] Entered {direction.upper()} at {elapsed}s (conf={ai_last_confidence}%)")
+                    elif now - ai_observe_start >= AI_OBSERVE_SECONDS:
+                        # 2-min max reached — force entry on any directional signal
+                        if signal in ("BUY_UP", "BUY_DOWN"):
+                            direction = "up" if signal == "BUY_UP" else "down"
+                            await ai_direct_buy(direction)
+                            ai_agent_state = "holding"
+                            print(f"[AI-AGENT] Force-entered {direction.upper()} at 2-min max (conf={ai_last_confidence}%)")
+                        else:
+                            print("[AI-AGENT] 2-min max: still WAIT — restarting scan")
                             ai_observe_start = now
+                    else:
+                        print(f"[AI-AGENT] Observing ({elapsed}s): {signal} {ai_last_confidence}% — need ≥40% to enter")
 
             elif ai_agent_state == "rescanning":
                 elapsed = now - ai_rescan_start
-                # Query every 10 sec — enter IMMEDIATELY if good signal found
+                # Query every 10 sec — enter immediately if signal found with ≥40% confidence
                 if now - ai_last_query_time >= 10:
                     signal = await get_ai_signal(force=True)
                     ai_last_query_time = now
-                    if signal in ("BUY_UP", "BUY_DOWN") and ai_last_confidence >= 55:
+                    if signal in ("BUY_UP", "BUY_DOWN") and ai_last_confidence >= 40:
                         direction = "up" if signal == "BUY_UP" else "down"
                         await ai_direct_buy(direction)
                         ai_agent_state = "holding"
