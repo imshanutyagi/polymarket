@@ -932,6 +932,10 @@ async def get_ai_signal(force: bool = False) -> str:
 async def ai_direct_buy(direction: str):
     """AI agent places a direct buy into the active portfolio."""
     global portfolio
+    # Respect the cycle profit target — stop trading once it's hit
+    if portfolio.cycle_profit >= global_profit_target:
+        print(f"[AI-AGENT] Cycle target ${global_profit_target:.2f} reached (profit=${portfolio.cycle_profit:.2f}) — no new entries")
+        return
     price = market.up_price if direction == "up" else market.down_price
     cost_per_share = price / 100.0
     if cost_per_share <= 0:
@@ -977,6 +981,11 @@ async def run_ai_agent():
 
             time_left = market.get_time_left_seconds()
             if time_left < 300:  # < 5 min left, don't enter new positions
+                continue
+
+            # Stop scanning once cycle profit target is reached
+            if portfolio.cycle_profit >= global_profit_target:
+                await asyncio.sleep(10)
                 continue
 
             has_position = portfolio.total_spent > 0
