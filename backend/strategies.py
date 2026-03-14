@@ -278,7 +278,7 @@ class ClaudeStrategy:
     RSI_PERIOD = 14
 
     # Zone-based profit taking
-    ZONE1_MIN = 1.00              # $1.00 — immediate sell threshold
+    ZONE1_MIN = 0.90              # $0.90 — immediate sell threshold
     ZONE1_MAX = 1.50              # $1.50 — upper bound of danger zone
     ZONE2_TRAILING_DROP = 0.15    # $0.15 drop from peak triggers sell in Zone 2
     PANIC_SELL_THRESHOLD = 1.00   # sell instantly if profit crashes below this after peaking above
