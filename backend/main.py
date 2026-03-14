@@ -631,6 +631,58 @@ strategy_a_strikes = 0
 strategy_a_done = False
 strategy_b_trade_done = False
 live_mode_enabled = os.getenv("LIVE_TRADING_ENABLED", "FALSE").upper() == "TRUE"  # Auto-set from .env
+
+# ── Settings persistence ────────────────────────────────────────────────────
+SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "settings.json")
+
+def save_settings():
+    """Persist active strategy and trading settings to disk so they survive server restarts."""
+    data = {
+        "active_strategy_a": active_strategy_a,
+        "active_strategy_b": active_strategy_b,
+        "active_strategy_c": active_strategy_c,
+        "active_strategy_c_trailing": active_strategy_c_trailing,
+        "active_strategy_d": active_strategy_d,
+        "active_strategy_e": active_strategy_e,
+        "active_strategy_f": active_strategy_f,
+        "active_strategy_7": active_strategy_7,
+        "active_strategy_cpt": active_strategy_cpt,
+        "active_strategy_claude": active_strategy_claude,
+        "global_profit_target": global_profit_target if global_profit_target != float('inf') else -1,
+    }
+    try:
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"[SETTINGS] Save error: {e}")
+
+def load_settings():
+    """Load persisted settings on startup."""
+    global active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing
+    global active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7
+    global active_strategy_cpt, active_strategy_claude, global_profit_target
+    try:
+        if not os.path.exists(SETTINGS_FILE):
+            return
+        with open(SETTINGS_FILE) as f:
+            data = json.load(f)
+        active_strategy_a         = data.get("active_strategy_a", False)
+        active_strategy_b         = data.get("active_strategy_b", False)
+        active_strategy_c         = data.get("active_strategy_c", False)
+        active_strategy_c_trailing= data.get("active_strategy_c_trailing", False)
+        active_strategy_d         = data.get("active_strategy_d", False)
+        active_strategy_e         = data.get("active_strategy_e", False)
+        active_strategy_f         = data.get("active_strategy_f", False)
+        active_strategy_7         = data.get("active_strategy_7", False)
+        active_strategy_cpt       = data.get("active_strategy_cpt", False)
+        active_strategy_claude    = data.get("active_strategy_claude", False)
+        pt = data.get("global_profit_target", 4.0)
+        global_profit_target      = float('inf') if pt == -1 else float(pt)
+        print(f"[SETTINGS] Loaded — active: {[k for k,v in data.items() if v is True]}")
+    except Exception as e:
+        print(f"[SETTINGS] Load error: {e}")
+
+load_settings()  # Apply persisted settings immediately at import time
 WARMUP_SECONDS = 0  # Warmup removed — per-strategy guards handle this (prices_loaded, Claude 3min observation, stale filter)
 cycle_warmup_until = 0.0  # No warmup
 
@@ -1689,20 +1741,24 @@ async def websocket_endpoint(websocket: WebSocket):
                     global_profit_target = float('inf')
                 else:
                     global_profit_target = float(val)
+                save_settings()
             elif action == "TOGGLE_STRATEGY_A":
                 active_strategy_a = not active_strategy_a
                 if active_strategy_a:
                     active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = active_strategy_cpt = active_strategy_claude = False
+                save_settings()
             elif action == "TOGGLE_STRATEGY_B":
                 active_strategy_b = not active_strategy_b
                 if active_strategy_b:
                     active_strategy_a = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = active_strategy_cpt = active_strategy_claude = False
+                save_settings()
             elif action == "TOGGLE_STRATEGY_C":
                 active_strategy_c = not active_strategy_c
                 if active_strategy_c:
                     paper_portfolio.cycle_profit = 0.0
                     live_portfolio.cycle_profit = 0.0
                     active_strategy_a = active_strategy_b = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = active_strategy_cpt = active_strategy_claude = False
+                save_settings()
             elif action == "TOGGLE_STRATEGY_C_TRAILING":
                 active_strategy_c_trailing = not active_strategy_c_trailing
                 if active_strategy_c_trailing:
@@ -1710,24 +1766,29 @@ async def websocket_endpoint(websocket: WebSocket):
                     live_portfolio.cycle_profit = 0.0
                     market.peak_profit = 0.0
                     active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = active_strategy_cpt = active_strategy_claude = False
+                save_settings()
             elif action == "TOGGLE_STRATEGY_D":
                 active_strategy_d = not active_strategy_d
                 if active_strategy_d:
                     active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_e = active_strategy_f = active_strategy_7 = active_strategy_cpt = active_strategy_claude = False
+                save_settings()
             elif action == "TOGGLE_STRATEGY_E":
                 active_strategy_e = not active_strategy_e
                 if active_strategy_e:
                     active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_f = active_strategy_7 = active_strategy_cpt = active_strategy_claude = False
+                save_settings()
             elif action == "TOGGLE_STRATEGY_F":
                 active_strategy_f = not active_strategy_f
                 if active_strategy_f:
                     active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_7 = active_strategy_cpt = active_strategy_claude = False
+                save_settings()
             elif action == "TOGGLE_STRATEGY_7":
                 active_strategy_7 = not active_strategy_7
                 if active_strategy_7:
                     paper_portfolio.cycle_profit = 0.0
                     live_portfolio.cycle_profit = 0.0
                     active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_cpt = active_strategy_claude = False
+                save_settings()
             elif action == "TOGGLE_STRATEGY_CPT":
                 active_strategy_cpt = not active_strategy_cpt
                 if active_strategy_cpt:
@@ -1735,6 +1796,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     live_portfolio.cycle_profit = 0.0
                     market.peak_profit = 0.0
                     active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = active_strategy_claude = False
+                save_settings()
             elif action == "TOGGLE_STRATEGY_CLAUDE":
                 active_strategy_claude = not active_strategy_claude
                 if active_strategy_claude:
@@ -1743,6 +1805,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     market.peak_profit = 0.0
                     claude_strategy.reset_state(full_reset=True)
                     active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = active_strategy_cpt = False
+                save_settings()
             elif action == "TOGGLE_LIVE_MODE":
                 if LIVE_TRADING_AVAILABLE:
                     live_mode_enabled = not live_mode_enabled
