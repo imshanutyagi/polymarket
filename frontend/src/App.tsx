@@ -72,7 +72,7 @@ function App() {
   const [loginPassword, setLoginPassword] = useState("");
 
   // AI Agent state
-  const [aiAgent, setAiAgent] = useState({enabled: false, model: 'claude', last_signal: 'WAIT', confidence: 0, has_key: false, state: 'idle', observe_seconds_left: 0, rescan_seconds_left: 0, block_reason: '', confidence_threshold: 55, max_entry: 70});
+  const [aiAgent, setAiAgent] = useState({enabled: false, model: 'claude', last_signal: 'WAIT', confidence: 0, has_key: false, state: 'idle', observe_seconds_left: 0, rescan_seconds_left: 0, block_reason: '', confidence_threshold: 55, max_entry: 70, max_spread: 8});
   const [aiTestResult, setAiTestResult] = useState<{ok: boolean, message: string} | null>(null);
   const [aiTesting, setAiTesting] = useState(false);
 
@@ -1525,6 +1525,33 @@ function App() {
                                 fontSize: '11px', fontWeight: 600,
                                 background: aiAgent.max_entry === v ? '#4299e1' : '#2d3748',
                                 color: aiAgent.max_entry === v ? 'white' : '#a0aec0'
+                              }}
+                            >{v === 0 ? 'OFF' : `${v}¢`}</button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Max Spread */}
+                      <div style={{marginBottom: '6px'}}>
+                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px'}}>
+                          <span style={{fontSize: '11px', fontWeight: 600, color: '#e2e8f0'}}>Max Spread</span>
+                          <span style={{fontSize: '12px', fontWeight: 700, color: aiAgent.max_spread === 0 ? '#a0aec0' : '#ed8936'}}>
+                            {aiAgent.max_spread === 0 ? 'OFF' : `${aiAgent.max_spread}¢`}
+                          </span>
+                        </div>
+                        <p style={{fontSize: '10px', color: '#718096', marginBottom: '4px', lineHeight: '1.3'}}>
+                          Spread = gap between buy price and sell price. Wide spread means you lose that amount just entering — e.g. 8¢ spread means you need an 8¢ move just to break even. Set to 0 to disable.
+                        </p>
+                        <div style={{display: 'flex', gap: '4px', flexWrap: 'wrap'}}>
+                          {[0, 3, 5, 8, 10, 15].map(v => (
+                            <button
+                              key={v}
+                              onClick={() => ws?.send(JSON.stringify({action: 'SET_AI_CONFIG', max_spread: v}))}
+                              style={{
+                                padding: '3px 8px', borderRadius: '10px', border: 'none', cursor: 'pointer',
+                                fontSize: '11px', fontWeight: 600,
+                                background: aiAgent.max_spread === v ? '#ed8936' : '#2d3748',
+                                color: aiAgent.max_spread === v ? 'white' : '#a0aec0'
                               }}
                             >{v === 0 ? 'OFF' : `${v}¢`}</button>
                           ))}

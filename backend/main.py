@@ -649,6 +649,7 @@ ai_last_signal_time = 0.0    # when signal was last fetched
 AI_SIGNAL_INTERVAL = 30.0    # re-query AI every 30 seconds
 ai_confidence_threshold = 55  # minimum confidence % required to place a trade (user-adjustable)
 ai_max_entry = 70             # max token price in cents allowed to enter (user-adjustable, 0=disabled)
+ai_max_spread = 8             # max bid-ask spread in cents allowed to enter (user-adjustable, 0=disabled)
 
 # AI Agent state machine
 AI_OBSERVE_SECONDS = 120   # 2-min initial observation
@@ -697,6 +698,7 @@ def save_settings():
         "ai_api_key": ai_api_key,
         "ai_confidence_threshold": ai_confidence_threshold,
         "ai_max_entry": ai_max_entry,
+        "ai_max_spread": ai_max_spread,
     }
     try:
         with open(SETTINGS_FILE, "w") as f:
@@ -709,7 +711,7 @@ def load_settings():
     global active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing
     global active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7
     global active_strategy_cpt, active_strategy_claude, global_profit_target
-    global ai_agent_enabled, ai_model, ai_api_key, ai_confidence_threshold, ai_max_entry
+    global ai_agent_enabled, ai_model, ai_api_key, ai_confidence_threshold, ai_max_entry, ai_max_spread
     try:
         if not os.path.exists(SETTINGS_FILE):
             return
@@ -732,6 +734,7 @@ def load_settings():
         ai_api_key                = data.get("ai_api_key", "")
         ai_confidence_threshold   = int(data.get("ai_confidence_threshold", 55))
         ai_max_entry              = int(data.get("ai_max_entry", 70))
+        ai_max_spread             = int(data.get("ai_max_spread", 8))
         print(f"[SETTINGS] Loaded — active: {[k for k,v in data.items() if v is True]}")
     except Exception as e:
         print(f"[SETTINGS] Load error: {e}")
@@ -1022,9 +1025,9 @@ async def ai_direct_buy(direction: str) -> bool:
         ai_block_reason = f"Market near-settled ({market.up_price}¢/{market.down_price}¢) — no edge"
         print(f"[AI-AGENT] Blocked: {ai_block_reason}")
         return False
-    # Hard stop 3: spread too wide — illiquid market, slippage risk
-    if market_spread_cents > 0 and market_spread_cents > 8:
-        ai_block_reason = f"Wide spread ({market_spread_cents}¢) — illiquid, skip entry"
+    # Hard stop 3: spread too wide — illiquid market, slippage risk (0 = disabled)
+    if ai_max_spread > 0 and market_spread_cents > 0 and market_spread_cents > ai_max_spread:
+        ai_block_reason = f"Wide spread ({market_spread_cents}¢ > max {ai_max_spread}¢) — illiquid"
         print(f"[AI-AGENT] Blocked: {ai_block_reason}")
         return False
     # Hard stop 4: cycle profit target hit — stop trading this cycle
@@ -1234,6 +1237,7 @@ async def broadcast_state():
                 "block_reason": ai_block_reason,
                 "confidence_threshold": ai_confidence_threshold,
                 "max_entry": ai_max_entry,
+                "max_spread": ai_max_spread,
             }
         }
     }
@@ -2188,7 +2192,7 @@ async def websocket_endpoint(websocket: WebSocket):
             cmd = json.loads(data)
             action = cmd.get("action")
             
-            global portfolio, active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing, active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7, active_strategy_cpt, active_strategy_claude, strategy_a_strikes, global_profit_target, live_mode_enabled, live_token_ids, strategy_stats, ai_agent_enabled, ai_model, ai_api_key, ai_last_signal, ai_last_confidence, ai_last_signal_time, clob_last_update_time, ai_confidence_threshold, ai_max_entry
+            global portfolio, active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing, active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7, active_strategy_cpt, active_strategy_claude, strategy_a_strikes, global_profit_target, live_mode_enabled, live_token_ids, strategy_stats, ai_agent_enabled, ai_model, ai_api_key, ai_last_signal, ai_last_confidence, ai_last_signal_time, clob_last_update_time, ai_confidence_threshold, ai_max_entry, ai_max_spread
             current_portfolio = live_portfolio if live_mode_enabled else paper_portfolio
             portfolio = current_portfolio
             if action == "BUY_UP":
@@ -2341,6 +2345,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     ai_confidence_threshold = max(1, min(99, int(cmd["confidence_threshold"])))
                 if "max_entry" in cmd:
                     ai_max_entry = max(0, min(99, int(cmd["max_entry"])))
+                if "max_spread" in cmd:
+                    ai_max_spread = max(0, min(20, int(cmd["max_spread"])))
                 save_settings()
             elif action == "TEST_AI":
                 # Force a fresh AI call and send back the result immediately
