@@ -1587,12 +1587,13 @@ async def market_loop():
                             asyncio.create_task(execute_live_sell(act["side"], act["shares"], act["price"]))
 
                     elif act["action"] == "limit_buy_fill":
-                        # If AI agent enabled, only allow buy if AI signal matches the side
-                        if ai_agent_enabled and current_ai_signal:
+                        # AI agent: only block when AI has conviction (>=50% confidence) AND disagrees.
+                        # WAIT signal or low confidence = let strategy decide normally.
+                        if ai_agent_enabled and current_ai_signal and ai_last_confidence >= 50:
                             expected = "BUY_UP" if act["side"] == "up" else "BUY_DOWN"
                             if current_ai_signal != expected:
                                 claude_strategy.held_positions[act["side"]] -= act["shares"]
-                                print(f"[AI] Blocked {act['side']} entry — AI says {current_ai_signal}")
+                                print(f"[AI] Blocked {act['side']} entry — AI says {current_ai_signal} ({ai_last_confidence}%)")
                                 continue  # skip this buy
                         cost = act["shares"] * (act["price"] / 100.0)
                         if portfolio.balance >= cost:
