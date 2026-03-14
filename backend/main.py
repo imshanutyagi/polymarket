@@ -655,6 +655,7 @@ ai_agent_state     = "idle"   # idle | observing | holding | rescanning
 ai_observe_start   = 0.0
 ai_rescan_start    = 0.0
 ai_last_query_time = 0.0
+ai_block_reason    = ""    # Human-readable reason why last buy was blocked (shown in UI)
 
 def record_stat(strategy_key: str, profit: float):
     if strategy_key in strategy_stats:
@@ -932,20 +933,23 @@ async def get_ai_signal(force: bool = False) -> str:
 
 async def ai_direct_buy(direction: str) -> bool:
     """AI agent places a direct buy into the active portfolio. Returns True if order was placed."""
-    global portfolio
+    global portfolio, ai_block_reason
     # Require at least one confirmed CLOB price — blocks trading on Gamma mid-prices (50/50)
     if clob_last_update_time == 0.0:
-        print(f"[AI-AGENT] Blocked: no CLOB price confirmed yet — waiting for real order book prices")
+        ai_block_reason = "Waiting for CLOB price confirmation"
+        print(f"[AI-AGENT] Blocked: {ai_block_reason}")
         return False
     # Respect the cycle profit target — stop trading once it's hit
     if portfolio.cycle_profit >= global_profit_target:
-        print(f"[AI-AGENT] Cycle target ${global_profit_target:.2f} reached (profit=${portfolio.cycle_profit:.2f}) — no new entries")
+        ai_block_reason = f"Cycle profit target ${global_profit_target:.2f} reached"
+        print(f"[AI-AGENT] Blocked: {ai_block_reason} (profit=${portfolio.cycle_profit:.2f})")
         return False
     # Enforce time-based price limits in code (not just prompt)
     time_left_secs = market.get_time_left_seconds()
     time_left_min = time_left_secs / 60
     if time_left_min <= 10:
-        print(f"[AI-AGENT] Blocked: only {time_left_min:.1f} min left — no entries in last 10 min")
+        ai_block_reason = f"Only {time_left_min:.0f} min left — no entries in last 10 min"
+        print(f"[AI-AGENT] Blocked: {ai_block_reason}")
         return False
     if time_left_min > 45:
         max_entry = 78
@@ -957,10 +961,12 @@ async def ai_direct_buy(direction: str) -> bool:
         max_entry = 55
     price = market.up_price if direction == "up" else market.down_price
     if price > max_entry:
-        print(f"[AI-AGENT] Blocked: {direction} price {price}¢ > max {max_entry}¢ for {time_left_min:.0f} min remaining")
+        ai_block_reason = f"{direction.upper()} price {price}¢ > max {max_entry}¢ ({time_left_min:.0f} min left)"
+        print(f"[AI-AGENT] Blocked: {ai_block_reason}")
         return False
     cost_per_share = price / 100.0
     if cost_per_share <= 0:
+        ai_block_reason = "Invalid price (0¢)"
         return False
     if ai_last_confidence >= 75:
         max_dollars = 10.0
@@ -975,8 +981,10 @@ async def ai_direct_buy(direction: str) -> bool:
         shares = round(portfolio.balance / cost_per_share, 2)
         cost = round(shares * cost_per_share, 4)
     if shares <= 0 or portfolio.balance < cost:
-        print(f"[AI-AGENT] Not enough balance for {direction} buy")
+        ai_block_reason = f"Insufficient balance (need ${cost:.2f}, have ${portfolio.balance:.2f})"
+        print(f"[AI-AGENT] Blocked: {ai_block_reason}")
         return False
+    ai_block_reason = ""  # Clear block reason — buy succeeded
     portfolio.balance -= cost
     portfolio.positions[direction] += shares
     portfolio.total_spent += cost
@@ -989,7 +997,7 @@ async def ai_direct_buy(direction: str) -> bool:
 
 async def run_ai_agent():
     """AI agent state machine: observe → enter → hold → rescan → enter."""
-    global ai_agent_state, ai_observe_start, ai_rescan_start, ai_last_query_time
+    global ai_agent_state, ai_observe_start, ai_rescan_start, ai_last_query_time, ai_block_reason
 
     while True:
         try:
@@ -1039,10 +1047,12 @@ async def run_ai_agent():
                         direction = "up" if signal == "BUY_UP" else "down"
                         bought = await ai_direct_buy(direction)
                         if bought:
+                            ai_block_reason = ""
                             ai_agent_state = "holding"
                             print(f"[AI-AGENT] Entered {direction.upper()} at {elapsed}s (conf={ai_last_confidence}%)")
-                        # If buy was blocked, stay in observing and retry on next tick
+                        # ai_block_reason was set inside ai_direct_buy — visible in UI
                     else:
+                        ai_block_reason = f"Signal: {signal} ({ai_last_confidence}%) — waiting for stronger signal"
                         print(f"[AI-AGENT] Scanning ({elapsed}s): {signal} {ai_last_confidence}% — waiting for opportunity...")
 
             elif ai_agent_state == "rescanning":
@@ -1055,9 +1065,10 @@ async def run_ai_agent():
                         direction = "up" if signal == "BUY_UP" else "down"
                         bought = await ai_direct_buy(direction)
                         if bought:
+                            ai_block_reason = ""
                             ai_agent_state = "holding"
                             print(f"[AI-AGENT] Re-entered {direction.upper()} at {elapsed}s (conf={ai_last_confidence}%)")
-                        # If buy was blocked, stay in rescanning and retry on next tick
+                        # ai_block_reason was set inside ai_direct_buy — visible in UI
                     else:
                         print(f"[AI-AGENT] Rescanning ({elapsed}s): {signal} {ai_last_confidence}% — waiting...")
 
@@ -1132,6 +1143,7 @@ async def broadcast_state():
                 "state": ai_agent_state,
                 "observe_seconds_left": max(0, round(AI_OBSERVE_SECONDS - (time.time() - ai_observe_start))) if ai_agent_state == "observing" else 0,
                 "rescan_seconds_left": max(0, round(AI_RESCAN_SECONDS - (time.time() - ai_rescan_start))) if ai_agent_state == "rescanning" else 0,
+                "block_reason": ai_block_reason,
             }
         }
     }

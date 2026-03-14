@@ -72,7 +72,7 @@ function App() {
   const [loginPassword, setLoginPassword] = useState("");
 
   // AI Agent state
-  const [aiAgent, setAiAgent] = useState({enabled: false, model: 'claude', last_signal: 'WAIT', confidence: 0, has_key: false, state: 'idle', observe_seconds_left: 0, rescan_seconds_left: 0});
+  const [aiAgent, setAiAgent] = useState({enabled: false, model: 'claude', last_signal: 'WAIT', confidence: 0, has_key: false, state: 'idle', observe_seconds_left: 0, rescan_seconds_left: 0, block_reason: ''});
   const [aiTestResult, setAiTestResult] = useState<{ok: boolean, message: string} | null>(null);
   const [aiTesting, setAiTesting] = useState(false);
 
@@ -1437,6 +1437,11 @@ function App() {
                         )}
                         {(aiAgent.state === 'idle' || !aiAgent.state) && (
                           <span style={{fontSize: '11px', color: '#718096'}}>Waiting for live market...</span>
+                        )}
+                        {aiAgent.block_reason && aiAgent.state !== 'holding' && (
+                          <div style={{marginTop: '4px', fontSize: '10px', color: '#fc8181', fontWeight: 500}}>
+                            ⚠ Blocked: {aiAgent.block_reason}
+                          </div>
                         )}
                       </div>
                       {/* AI Signal */}
