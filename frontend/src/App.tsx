@@ -126,7 +126,6 @@ function App() {
   const [isAutoPilotEnabled, setIsAutoPilotEnabled] = useState(true);
   const manualTargetRef = useRef<number | null>(null);
   const [isTargetEditing, setIsTargetEditing] = useState(false);
-  const lastAutoTargetHour = useRef<number>(-1);
 
   // On page load, immediately connect to the current hourly market
   useEffect(() => {
@@ -154,31 +153,8 @@ function App() {
   }, [ws, wsConnected, activeLiveSlug]);
 
   // Auto-fetch BTC hourly candle open price from Binance (fallback only)
-  useEffect(() => {
-    const fetchBtcOpenPrice = async () => {
-      const currentHour = new Date().getUTCHours();
-      if (lastAutoTargetHour.current === currentHour && manualTargetRef.current !== null) return;
-      try {
-        const res = await fetch("https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=1");
-        const data = await res.json();
-        if (data && data.length > 0) {
-          const openPrice = parseFloat(data[0][1]);
-          manualTargetRef.current = openPrice;
-          lastAutoTargetHour.current = currentHour;
-          // Only apply if backend hasn't already set a price from Polymarket
-          setMarket(prev => prev.price_to_beat > 0 ? prev : { ...prev, price_to_beat: openPrice });
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ action: "SYNC_LIVE_GAMMA", target_price: openPrice }));
-          }
-        }
-      } catch (e) {
-        console.error("Binance open price fetch failed", e);
-      }
-    };
-    fetchBtcOpenPrice();
-    const interval = setInterval(fetchBtcOpenPrice, 60000);
-    return () => clearInterval(interval);
-  }, [ws]);
+  // Target price comes from Polymarket via backend (auto_discover parses it from the market question).
+  // No Binance fallback — using a different price source could mislead the AI on direction.
 
   useEffect(() => {
     let interval: ReturnType<typeof setInterval>;
