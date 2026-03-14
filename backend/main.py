@@ -918,16 +918,20 @@ async def market_loop():
                         dynamic_target = 0.70
                     # 10-15 min: keep $1.00 (normal target)
 
-                    market.peak_profit = max(live_profit, market.peak_profit)
+                    # Only update peak when prices are valid — flickered 1c/99c would
+                    # inflate peak_profit and cause the trailing stop to exit at $0
+                    prices_valid = 6 <= market.up_price <= 94 and 6 <= market.down_price <= 94
+                    if prices_valid:
+                        market.peak_profit = max(live_profit, market.peak_profit)
 
                     did_exit = False
 
                     # Claude + C+Trailing + CPT: same exit logic
                     # 1. Instant sell when profit hits $1.00–$1.50
-                    if dynamic_target <= live_profit <= 1.50:
+                    if prices_valid and dynamic_target <= live_profit <= 1.50:
                         did_exit = True
                     # 2. Trailing sell: spiked > $1.50, exit when drops $0.15 from peak
-                    elif market.peak_profit > 1.50 and live_profit <= (market.peak_profit - 0.15):
+                    elif prices_valid and market.peak_profit > 1.50 and live_profit <= (market.peak_profit - 0.15):
                         did_exit = True
                     # (No panic sell — let stop-loss handle the downside)
 
