@@ -1522,8 +1522,15 @@ async def stream_live_prices():
                                 continue
 
                             val = max(1, min(99, round(mid * 100)))
-                            is_stale = val <= 3 or val >= 97
-                            if is_stale:
+
+                            # Reject settlement/thin-book prices
+                            if val <= 5 or val >= 95:
+                                continue
+
+                            # Reject any single-tick jump > 35¢ (settlement bleed-through)
+                            if asset_id == up_token and abs(val - market.up_price) > 35:
+                                continue
+                            if asset_id == down_token and abs(val - market.down_price) > 35:
                                 continue
 
                             if asset_id == up_token:
@@ -1646,7 +1653,7 @@ async def auto_discover_market():
                                     # Set market state for new cycle (reject stale/thin-book prices)
                                     up_clamped = max(1, min(99, up_price))
                                     dn_clamped = max(1, min(99, down_price))
-                                    is_stale = (up_clamped <= 5 and dn_clamped >= 94) or (up_clamped >= 94 and dn_clamped <= 5)
+                                    is_stale = (up_clamped <= 5 or dn_clamped <= 5 or up_clamped >= 95 or dn_clamped >= 95)
                                     market.is_live = True
                                     market.transitioning = False  # New market found — simulator can run again
                                     market.live_slug = slug
@@ -1700,7 +1707,7 @@ async def _poll_live_prices():
                         if yes_idx != -1 and no_idx != -1 and len(prices) > max(yes_idx, no_idx):
                             up_val = max(1, min(99, round(float(prices[yes_idx]) * 100)))
                             dn_val = max(1, min(99, round(float(prices[no_idx])  * 100)))
-                            is_stale = (up_val <= 5 and dn_val >= 94) or (up_val >= 94 and dn_val <= 5)
+                            is_stale = (up_val <= 5 or dn_val <= 5 or up_val >= 95 or dn_val >= 95)
                             if not is_stale:
                                 market.up_price   = up_val
                                 market.down_price = dn_val
@@ -1728,7 +1735,7 @@ async def _poll_live_prices():
             up_val = max(1, min(99, round(float(up_raw) * 100)))
             dn_val = max(1, min(99, round(float(dn_raw) * 100))) if dn_raw else market.down_price
             # Reject stale/thin-book prices: expired or illiquid new market
-            is_stale = (up_val <= 5 and dn_val >= 94) or (up_val >= 94 and dn_val <= 5)
+            is_stale = (up_val <= 5 or dn_val <= 5 or up_val >= 95 or dn_val >= 95)
             if not is_stale:
                 market.up_price = up_val
                 if dn_raw:
