@@ -823,16 +823,21 @@ async def get_ai_signal() -> str:
     time_left_min = int(market.get_time_left_seconds() / 60)
 
     prompt = (
-        f"You are a Polymarket trading assistant. Analyze this Bitcoin Up/Down market:\n"
-        f"Time remaining: {time_left_min} minutes\n"
-        f"UP price: {market.up_price}¢ (probability BTC ends ABOVE target)\n"
-        f"DOWN price: {market.down_price}¢ (probability BTC ends BELOW target)\n"
-        f"Target price to beat: ${market.price_to_beat:.2f}\n"
-        f"Recent UP price trend (last 10 ticks): {prices_str}\n\n"
-        f"Should I enter a trade now? Consider: price momentum, time remaining, odds value.\n"
-        f"Reply in this exact format: SIGNAL:CONFIDENCE\n"
-        f"Where SIGNAL is BUY_UP, BUY_DOWN, or WAIT, and CONFIDENCE is 0-100.\n"
-        f"Example: BUY_DOWN:75"
+        f"You are a Polymarket trading bot. Analyze this Bitcoin Up/Down binary market and give a trading signal.\n\n"
+        f"Market data:\n"
+        f"- Time remaining: {time_left_min} minutes\n"
+        f"- UP price: {market.up_price}¢ (market thinks {market.up_price}% chance BTC ends ABOVE target)\n"
+        f"- DOWN price: {market.down_price}¢ (market thinks {market.down_price}% chance BTC ends BELOW target)\n"
+        f"- BTC target price: ${market.price_to_beat:.2f}\n"
+        f"- Recent UP price trend (last 10 ticks): {prices_str}\n\n"
+        f"Rules:\n"
+        f"- If UP price is trending UP and below 45¢, signal BUY_UP\n"
+        f"- If UP price is trending DOWN and above 55¢, signal BUY_DOWN\n"
+        f"- If trend is unclear or price is between 45-55¢, signal WAIT\n"
+        f"- Be decisive. Only WAIT if truly no edge.\n\n"
+        f"Reply with ONLY this format (no explanation): SIGNAL:CONFIDENCE\n"
+        f"SIGNAL = BUY_UP, BUY_DOWN, or WAIT. CONFIDENCE = 0-100.\n"
+        f"Example: BUY_DOWN:72"
     )
 
     try:
@@ -849,13 +854,14 @@ async def get_ai_signal() -> str:
         else:  # gemini
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={ai_api_key}",
+                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={ai_api_key}",
                     json={"contents": [{"parts": [{"text": prompt}]}],
                           "generationConfig": {"maxOutputTokens": 20}}
                 )
                 data = resp.json()
                 text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "WAIT:0").strip().upper()
 
+        print(f"[AI] Raw response: {text!r}")
         # Parse SIGNAL:CONFIDENCE format
         confidence = 0
         if ":" in text:
@@ -874,7 +880,6 @@ async def get_ai_signal() -> str:
             signal = "BUY_DOWN"
         else:
             signal = "WAIT"
-            confidence = 0
 
         ai_last_signal = signal
         ai_last_confidence = confidence
@@ -1587,9 +1592,10 @@ async def market_loop():
                             asyncio.create_task(execute_live_sell(act["side"], act["shares"], act["price"]))
 
                     elif act["action"] == "limit_buy_fill":
-                        # AI agent: only block when AI has conviction (>=50% confidence) AND disagrees.
-                        # WAIT signal or low confidence = let strategy decide normally.
-                        if ai_agent_enabled and current_ai_signal and ai_last_confidence >= 50:
+                        # When AI is ON, it is the sole entry gatekeeper.
+                        # Only allow buy if AI explicitly says BUY_UP or BUY_DOWN for this side.
+                        # WAIT = no trade allowed.
+                        if ai_agent_enabled:
                             expected = "BUY_UP" if act["side"] == "up" else "BUY_DOWN"
                             if current_ai_signal != expected:
                                 claude_strategy.held_positions[act["side"]] -= act["shares"]
