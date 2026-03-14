@@ -641,12 +641,14 @@ strategy_stats = {k: {"trades":0,"wins":0,"total_profit":0.0,"best":0.0,"worst":
 
 # AI Agent globals
 ai_agent_enabled = False
-ai_model = "claude"   # "claude" or "gemini"
+ai_model = "claude-haiku"   # claude-haiku | claude-sonnet | claude-opus | gemini-flash | gemini-pro
 ai_api_key = ""
 ai_last_signal = "WAIT"      # last signal from AI
 ai_last_confidence = 0       # 0-100 confidence from AI
 ai_last_signal_time = 0.0    # when signal was last fetched
 AI_SIGNAL_INTERVAL = 30.0    # re-query AI every 30 seconds
+ai_confidence_threshold = 55  # minimum confidence % required to place a trade (user-adjustable)
+ai_max_entry = 70             # max token price in cents allowed to enter (user-adjustable, 0=disabled)
 
 # AI Agent state machine
 AI_OBSERVE_SECONDS = 120   # 2-min initial observation
@@ -656,7 +658,8 @@ ai_observe_start   = 0.0
 ai_rescan_start    = 0.0
 ai_last_query_time = 0.0
 ai_block_reason    = ""    # Human-readable reason why last buy was blocked (shown in UI)
-position_entry_time = 0.0  # When the current portfolio position was first opened this cycle
+position_entry_time = 0.0          # Unix timestamp when current position was opened
+position_entry_time_left_min = 60.0  # Minutes remaining when position was opened (for stop-loss tier)
 
 def record_stat(strategy_key: str, profit: float):
     if strategy_key in strategy_stats:
@@ -692,6 +695,8 @@ def save_settings():
         "ai_agent_enabled": ai_agent_enabled,
         "ai_model": ai_model,
         "ai_api_key": ai_api_key,
+        "ai_confidence_threshold": ai_confidence_threshold,
+        "ai_max_entry": ai_max_entry,
     }
     try:
         with open(SETTINGS_FILE, "w") as f:
@@ -704,7 +709,7 @@ def load_settings():
     global active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing
     global active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7
     global active_strategy_cpt, active_strategy_claude, global_profit_target
-    global ai_agent_enabled, ai_model, ai_api_key
+    global ai_agent_enabled, ai_model, ai_api_key, ai_confidence_threshold, ai_max_entry
     try:
         if not os.path.exists(SETTINGS_FILE):
             return
@@ -723,8 +728,10 @@ def load_settings():
         pt = data.get("global_profit_target", 4.0)
         global_profit_target      = float('inf') if pt == -1 else float(pt)
         ai_agent_enabled          = data.get("ai_agent_enabled", False)
-        ai_model                  = data.get("ai_model", "claude")
+        ai_model                  = data.get("ai_model", "claude-haiku")
         ai_api_key                = data.get("ai_api_key", "")
+        ai_confidence_threshold   = int(data.get("ai_confidence_threshold", 55))
+        ai_max_entry              = int(data.get("ai_max_entry", 70))
         print(f"[SETTINGS] Loaded — active: {[k for k,v in data.items() if v is True]}")
     except Exception as e:
         print(f"[SETTINGS] Load error: {e}")
@@ -842,60 +849,94 @@ async def get_ai_signal(force: bool = False) -> str:
         elif recent[-1] < recent[0] - 2:
             trend_str = "falling"
 
-    # Price entry limits based on time remaining (less time = stricter price limit)
-    if time_left_min > 45:
-        max_entry = 78
-    elif time_left_min > 30:
-        max_entry = 72
+    # Order size tier based on time remaining
+    if time_left_min > 40:
+        order_size = 13.0
+        size_label = "$13 (>40 min left)"
     elif time_left_min > 15:
-        max_entry = 65
+        order_size = 10.0
+        size_label = "$10 (15-40 min left)"
     elif time_left_min > 5:
-        max_entry = 55
+        order_size = 5.0
+        size_label = "$5 (5-15 min left)"
     else:
-        max_entry = 0  # Don't enter last 5 min
+        order_size = 0.0
+        size_label = "NO TRADE (<5 min left)"
 
-    # Suggested trade size
+    # Stop-loss tier based on time remaining
+    if time_left_min > 40:
+        stop_loss_str = "-$4.00 (first 20 min — golden zone)"
+    elif time_left_min > 20:
+        stop_loss_str = "-$2.50 (mid 20-40 min)"
+    else:
+        stop_loss_str = "-$1.50 (last 20 min — tight)"
+
     bal = portfolio.balance
-    suggested_dollars = round(min(10.0, max(2.0, bal * 0.25)), 2)
+
+    # Current BTC position vs target
+    try:
+        btc_vs_target = f"BTC is currently ${market.current_price - market.price_to_beat:+.0f} vs target (${market.current_price:.0f} vs ${market.price_to_beat:.0f})"
+    except Exception:
+        btc_vs_target = "BTC position vs target: unknown"
 
     prompt = (
-        f"You are a Polymarket scalping bot trading BTC Up/Down binary options.\n\n"
-        f"Market snapshot:\n"
+        f"You are a Polymarket scalping bot. Trade BTC Up/Down binary options with HIGH CONVICTION only.\n\n"
+        f"MARKET SNAPSHOT:\n"
         f"- Time remaining: {time_left_min} minutes\n"
-        f"- UP token price: {market.up_price}¢ (probability BTC ends ABOVE ${market.price_to_beat:.0f})\n"
-        f"- DOWN token price: {market.down_price}¢ (probability BTC ends BELOW ${market.price_to_beat:.0f})\n"
+        f"- UP token price: {market.up_price}¢  (pays $1 if BTC ends ABOVE ${market.price_to_beat:.0f})\n"
+        f"- DOWN token price: {market.down_price}¢  (pays $1 if BTC ends BELOW ${market.price_to_beat:.0f})\n"
+        f"- {btc_vs_target}\n"
         f"- UP price trend: {trend_str}\n"
         f"- Recent UP prices (oldest→newest): {prices_str}\n\n"
-        f"Trade parameters:\n"
+        f"CURRENT RULES:\n"
+        f"- Your order size this turn: {size_label}\n"
+        f"- Active stop-loss tier: {stop_loss_str}\n"
         f"- Available balance: ${bal:.2f}\n"
-        f"- Suggested order size: ${suggested_dollars:.2f}\n"
-        f"- Max entry price: {max_entry}¢ (do NOT buy if token costs more — insufficient time for profit)\n\n"
-        f"Trading rules:\n"
-        f"- BUY_UP: trend rising OR UP price > 55¢ AND up_price <= {max_entry}¢\n"
-        f"- BUY_DOWN: trend falling OR UP price < 45¢ AND down_price <= {max_entry}¢\n"
-        f"- WAIT: only if time < 5 min, OR chosen token price exceeds {max_entry}¢\n"
-        f"- Near 50/50 with flat trend → pick BUY_UP if BTC above target, else BUY_DOWN\n"
-        f"- Be decisive: WAIT is only valid when entry price is too high for time remaining.\n\n"
+        f"- Minimum confidence required to trade: {ai_confidence_threshold}%\n"
+        f"- Max entry price allowed: {'disabled (any price)' if ai_max_entry == 0 else str(ai_max_entry) + '¢ per token'}\n\n"
+        f"DECISION LOGIC:\n"
+        f"- WAIT if time_remaining < 5 min (enforced by system — no trade placed anyway)\n"
+        f"- WAIT if the market is near 50/50 AND trend is flat — no edge, don't guess\n"
+        f"- BUY_UP if trend is rising, UP price {'< ' + str(ai_max_entry) + '¢' if ai_max_entry > 0 else 'any price'}, AND BTC is near or above target — strong edge\n"
+        f"- BUY_DOWN if trend is falling, DOWN price {'< ' + str(ai_max_entry) + '¢' if ai_max_entry > 0 else 'any price'}, AND BTC is near or below target — strong edge\n"
+        f"- Only signal BUY if confidence >= {ai_confidence_threshold}. Signal WAIT if no clear edge.\n"
+        f"- Near 50/50 with flat trend: BUY_UP if BTC above target, BUY_DOWN if below — but only if trending.\n"
+        f"- Stop-losses are tight in late game — be especially conservative with <20 min left.\n\n"
         f"Reply with ONLY: SIGNAL:CONFIDENCE (no explanation)\n"
         f"SIGNAL = BUY_UP, BUY_DOWN, or WAIT. CONFIDENCE = 0-100.\n"
         f"Examples: BUY_UP:70  or  BUY_DOWN:65  or  WAIT:20"
     )
 
+    # Map model selection to actual API model IDs
+    CLAUDE_MODEL_IDS = {
+        "claude-haiku":  "claude-haiku-4-5-20251001",
+        "claude-sonnet": "claude-sonnet-4-6",
+        "claude-opus":   "claude-opus-4-6",
+        "claude":        "claude-haiku-4-5-20251001",  # legacy default
+    }
+    GEMINI_MODEL_IDS = {
+        "gemini-flash": "gemini-2.0-flash",
+        "gemini-pro":   "gemini-2.0-pro-exp",
+        "gemini":       "gemini-2.0-flash",  # legacy default
+    }
+
     try:
-        if ai_model == "claude":
-            async with httpx.AsyncClient(timeout=10.0) as client:
+        if ai_model in CLAUDE_MODEL_IDS:
+            model_id = CLAUDE_MODEL_IDS[ai_model]
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(
                     "https://api.anthropic.com/v1/messages",
                     headers={"x-api-key": ai_api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                    json={"model": "claude-haiku-4-5-20251001", "max_tokens": 20,
+                    json={"model": model_id, "max_tokens": 20,
                           "messages": [{"role": "user", "content": prompt}]}
                 )
                 data = resp.json()
                 text = data.get("content", [{}])[0].get("text", "WAIT:0").strip().upper()
         else:  # gemini
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            model_id = GEMINI_MODEL_IDS.get(ai_model, "gemini-2.0-flash")
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={ai_api_key}",
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={ai_api_key}",
                     json={"contents": [{"parts": [{"text": prompt}]}],
                           "generationConfig": {"maxOutputTokens": 20}}
                 )
@@ -933,8 +974,8 @@ async def get_ai_signal(force: bool = False) -> str:
 
 
 async def ai_direct_buy(direction: str) -> bool:
-    """AI agent places a direct buy. AI decides timing/price — we only enforce 3 hard stops."""
-    global portfolio, ai_block_reason, position_entry_time
+    """AI agent places a direct buy with time-based order size limits."""
+    global portfolio, ai_block_reason, position_entry_time, position_entry_time_left_min
     # Hard stop 1: no CLOB price yet — would trade on fake Gamma 50/50 prices
     if clob_last_update_time == 0.0:
         ai_block_reason = "Waiting for CLOB price confirmation"
@@ -945,18 +986,28 @@ async def ai_direct_buy(direction: str) -> bool:
         ai_block_reason = f"Cycle profit target ${global_profit_target:.2f} reached"
         print(f"[AI-AGENT] Blocked: {ai_block_reason} (profit=${portfolio.cycle_profit:.2f})")
         return False
-    # AI handles timing, price levels, and direction — trust it
+    # Time-based order size + trading cutoff
+    time_left_min = market.get_time_left_seconds() / 60
+    if time_left_min <= 5:
+        ai_block_reason = f"Last 5 min — no new trades"
+        print(f"[AI-AGENT] Blocked: {ai_block_reason}")
+        return False
+    if time_left_min > 40:       # first 20 min of cycle
+        max_dollars = 13.0
+    elif time_left_min > 15:     # min 15-40 remaining
+        max_dollars = 10.0
+    else:                        # min 5-15 remaining
+        max_dollars = 5.0
     price = market.up_price if direction == "up" else market.down_price
     cost_per_share = price / 100.0
     if cost_per_share <= 0:
         ai_block_reason = "Invalid price (0¢)"
         return False
-    if ai_last_confidence >= 75:
-        max_dollars = 10.0
-    elif ai_last_confidence >= 60:
-        max_dollars = 7.0
-    else:
-        max_dollars = 5.0
+    # Max entry price check (user-configurable, 0 = disabled)
+    if ai_max_entry > 0 and price > ai_max_entry:
+        ai_block_reason = f"Token price {price}¢ > max entry {ai_max_entry}¢"
+        print(f"[AI-AGENT] Blocked: {ai_block_reason}")
+        return False
     shares = round(max_dollars / cost_per_share, 2)
     shares = max(1.0, shares)
     cost = round(shares * cost_per_share, 4)
@@ -967,13 +1018,14 @@ async def ai_direct_buy(direction: str) -> bool:
         ai_block_reason = f"Insufficient balance (need ${cost:.2f}, have ${portfolio.balance:.2f})"
         print(f"[AI-AGENT] Blocked: {ai_block_reason}")
         return False
-    ai_block_reason = ""  # Clear block reason — buy succeeded
+    ai_block_reason = ""
     portfolio.balance -= cost
     portfolio.positions[direction] += shares
     portfolio.total_spent += cost
     portfolio.spent[direction] += cost
-    position_entry_time = time.time()  # Record when position was opened (for hold-in-loss rule)
-    print(f"[AI-AGENT] BUY {direction.upper()} | {shares} shares @ {price}¢ | cost=${cost:.2f} | conf={ai_last_confidence}%")
+    position_entry_time = time.time()
+    position_entry_time_left_min = time_left_min  # Record time-left at entry for stop-loss tier
+    print(f"[AI-AGENT] BUY {direction.upper()} | {shares} shares @ {price}¢ | cost=${cost:.2f} | conf={ai_last_confidence}% | {time_left_min:.0f}min left")
     if live_mode_enabled:
         asyncio.create_task(execute_live_buy(direction, shares, price))
     return True
@@ -1033,7 +1085,7 @@ async def run_ai_agent():
                     signal = await get_ai_signal(force=True)
                     ai_last_query_time = now
                     elapsed = round(now - ai_observe_start)
-                    if signal in ("BUY_UP", "BUY_DOWN") and ai_last_confidence >= 40:
+                    if signal in ("BUY_UP", "BUY_DOWN") and ai_last_confidence >= ai_confidence_threshold:
                         direction = "up" if signal == "BUY_UP" else "down"
                         bought = await ai_direct_buy(direction)
                         if bought:
@@ -1042,7 +1094,7 @@ async def run_ai_agent():
                             print(f"[AI-AGENT] Entered {direction.upper()} at {elapsed}s (conf={ai_last_confidence}%)")
                         # ai_block_reason was set inside ai_direct_buy — visible in UI
                     else:
-                        ai_block_reason = f"Signal: {signal} ({ai_last_confidence}%) — waiting for stronger signal"
+                        ai_block_reason = f"Signal: {signal} ({ai_last_confidence}%) — need ≥{ai_confidence_threshold}%"
                         print(f"[AI-AGENT] Scanning ({elapsed}s): {signal} {ai_last_confidence}% — waiting for opportunity...")
 
             elif ai_agent_state == "rescanning":
@@ -1051,7 +1103,7 @@ async def run_ai_agent():
                     signal = await get_ai_signal(force=True)
                     ai_last_query_time = now
                     elapsed = round(now - ai_rescan_start)
-                    if signal in ("BUY_UP", "BUY_DOWN") and ai_last_confidence >= 40:
+                    if signal in ("BUY_UP", "BUY_DOWN") and ai_last_confidence >= ai_confidence_threshold:
                         direction = "up" if signal == "BUY_UP" else "down"
                         bought = await ai_direct_buy(direction)
                         if bought:
@@ -1134,6 +1186,8 @@ async def broadcast_state():
                 "observe_seconds_left": max(0, round(AI_OBSERVE_SECONDS - (time.time() - ai_observe_start))) if ai_agent_state == "observing" else 0,
                 "rescan_seconds_left": max(0, round(AI_RESCAN_SECONDS - (time.time() - ai_rescan_start))) if ai_agent_state == "rescanning" else 0,
                 "block_reason": ai_block_reason,
+                "confidence_threshold": ai_confidence_threshold,
+                "max_entry": ai_max_entry,
             }
         }
     }
@@ -1176,7 +1230,7 @@ async def sync_live_balance():
 async def market_loop():
     global active_strategy_a, active_strategy_b, active_strategy_claude
     global strategy_a_strikes, strategy_b_trade_done, strategy_a_done
-    global cycle_warmup_until, ai_agent_state, clob_last_update_time, position_entry_time
+    global cycle_warmup_until, ai_agent_state, clob_last_update_time, position_entry_time, position_entry_time_left_min
 
     while True:
         global portfolio
@@ -1201,6 +1255,7 @@ async def market_loop():
                 market.prices_loaded = False
                 clob_last_update_time = 0.0
                 position_entry_time = 0.0
+                position_entry_time_left_min = 60.0
                 asyncio.create_task(cancel_all_open_orders())
                 ai_agent_state = "idle"
 
@@ -1226,15 +1281,29 @@ async def market_loop():
                 down_val = portfolio.positions['down'] * (market.down_price / 100.0)
                 live_profit = (up_val + down_val) - sunk
                 
-                # Hold-in-loss rule: if position entered in first 20 min and loss is small (< $1.50),
-                # hold — likely just noise with 40+ min to recover.
-                # If loss > $1.50 → exit normally to prevent total wipeout.
-                entered_in_first_20 = (position_entry_time > 0 and
-                                       position_entry_time - market.cycle_start_time < 1200)
-                if entered_in_first_20 and -1.50 < live_profit < 0:
-                    # Small loss, plenty of time — hold for recovery
-                    pass
-                elif active_strategy_c_trailing or active_strategy_cpt or active_strategy_claude:
+                # Tiered stop-loss based on when position was entered (time remaining at entry):
+                #   Entered >40 min left (first 20 min): hold up to -$4 loss
+                #   Entered 20-40 min left:              hold up to -$2.50 loss
+                #   Entered <20 min left (last 20 min):  hold up to -$1.50 loss
+                if position_entry_time > 0:
+                    if position_entry_time_left_min > 40:
+                        stop_loss = -4.0
+                    elif position_entry_time_left_min > 20:
+                        stop_loss = -2.50
+                    else:
+                        stop_loss = -1.50
+                    if live_profit < 0 and live_profit > stop_loss:
+                        pass  # Still within stop-loss — hold
+                    elif live_profit <= stop_loss:
+                        # Stop-loss hit — exit now
+                        record_stat("strategy_claude", live_profit)
+                        portfolio.cash_out(market.up_price, market.down_price)
+                        market.peak_profit = 0.0
+                        position_entry_time = 0.0
+                        print(f"[AI-AGENT] Stop-loss hit: ${live_profit:.2f} (limit=${stop_loss:.2f}) — exiting")
+                        continue
+
+                if active_strategy_c_trailing or active_strategy_cpt or active_strategy_claude:
                     # Time-Decaying Profit Target
                     if time_left <= 300:        # last 5 min
                         dynamic_target = 0.50
@@ -2039,7 +2108,7 @@ async def websocket_endpoint(websocket: WebSocket):
             cmd = json.loads(data)
             action = cmd.get("action")
             
-            global portfolio, active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing, active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7, active_strategy_cpt, active_strategy_claude, strategy_a_strikes, global_profit_target, live_mode_enabled, live_token_ids, strategy_stats, ai_agent_enabled, ai_model, ai_api_key, ai_last_signal, ai_last_confidence, ai_last_signal_time, clob_last_update_time
+            global portfolio, active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing, active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7, active_strategy_cpt, active_strategy_claude, strategy_a_strikes, global_profit_target, live_mode_enabled, live_token_ids, strategy_stats, ai_agent_enabled, ai_model, ai_api_key, ai_last_signal, ai_last_confidence, ai_last_signal_time, clob_last_update_time, ai_confidence_threshold, ai_max_entry
             current_portfolio = live_portfolio if live_mode_enabled else paper_portfolio
             portfolio = current_portfolio
             if action == "BUY_UP":
@@ -2188,6 +2257,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 key = cmd.get("api_key", "")
                 if key:
                     ai_api_key = key
+                if "confidence_threshold" in cmd:
+                    ai_confidence_threshold = max(1, min(99, int(cmd["confidence_threshold"])))
+                if "max_entry" in cmd:
+                    ai_max_entry = max(0, min(99, int(cmd["max_entry"])))
                 save_settings()
             elif action == "TEST_AI":
                 # Force a fresh AI call and send back the result immediately

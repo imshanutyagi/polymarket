@@ -72,7 +72,7 @@ function App() {
   const [loginPassword, setLoginPassword] = useState("");
 
   // AI Agent state
-  const [aiAgent, setAiAgent] = useState({enabled: false, model: 'claude', last_signal: 'WAIT', confidence: 0, has_key: false, state: 'idle', observe_seconds_left: 0, rescan_seconds_left: 0, block_reason: ''});
+  const [aiAgent, setAiAgent] = useState({enabled: false, model: 'claude', last_signal: 'WAIT', confidence: 0, has_key: false, state: 'idle', observe_seconds_left: 0, rescan_seconds_left: 0, block_reason: '', confidence_threshold: 55, max_entry: 70});
   const [aiTestResult, setAiTestResult] = useState<{ok: boolean, message: string} | null>(null);
   const [aiTesting, setAiTesting] = useState(false);
 
@@ -1385,7 +1385,15 @@ function App() {
                     onChange={e => ws?.send(JSON.stringify({action: 'SET_AI_CONFIG', model: e.target.value}))}
                     style={{width: '100%', marginBottom: '6px', padding: '4px', background: '#2d3748', color: 'white', border: '1px solid #4a5568', borderRadius: '4px', fontSize: '12px'}}
                   >
-                    <option value="claude">Claude Haiku (Anthropic)</option>
+                    <optgroup label="Anthropic">
+                      <option value="claude-haiku">Claude Haiku 4.5 — fast &amp; cheap</option>
+                      <option value="claude-sonnet">Claude Sonnet 4.6 — balanced</option>
+                      <option value="claude-opus">Claude Opus 4.6 — most powerful</option>
+                    </optgroup>
+                    <optgroup label="Google">
+                      <option value="gemini-flash">Gemini 2.0 Flash — fast &amp; free tier</option>
+                      <option value="gemini-pro">Gemini 2.0 Pro — stronger reasoning</option>
+                    </optgroup>
                   </select>
                   <div style={{display: 'flex', gap: '4px'}}>
                     <input
@@ -1452,7 +1460,7 @@ function App() {
                           {aiAgent.last_signal === 'WAIT' ? '— WAIT —' : aiAgent.last_signal}
                         </span>
                       </div>
-                      {/* AI Confidence bar */}
+                      {/* AI Confidence bar — live reading */}
                       <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '3px'}}>
                         <span style={{fontSize: '11px', color: '#a0aec0'}}>AI Confidence</span>
                         <span style={{fontSize: '11px', fontWeight: 600,
@@ -1460,13 +1468,67 @@ function App() {
                           {aiAgent.confidence}%
                         </span>
                       </div>
-                      <div style={{width: '100%', height: '5px', background: '#2d3748', borderRadius: '3px', overflow: 'hidden'}}>
+                      <div style={{width: '100%', height: '5px', background: '#2d3748', borderRadius: '3px', overflow: 'hidden', marginBottom: '10px'}}>
                         <div style={{
                           height: '100%', borderRadius: '3px',
                           width: `${aiAgent.confidence}%`,
                           background: aiAgent.confidence >= 75 ? '#48bb78' : aiAgent.confidence >= 50 ? '#ecc94b' : '#4a5568',
                           transition: 'width 0.5s ease'
                         }} />
+                      </div>
+
+                      {/* Divider */}
+                      <div style={{borderTop: '1px solid #2d3748', marginBottom: '10px'}} />
+
+                      {/* Confidence Threshold Slider */}
+                      <div style={{marginBottom: '10px'}}>
+                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px'}}>
+                          <span style={{fontSize: '11px', fontWeight: 600, color: '#e2e8f0'}}>Min Confidence</span>
+                          <span style={{fontSize: '12px', fontWeight: 700,
+                            color: aiAgent.confidence_threshold >= 70 ? '#fc8181' : aiAgent.confidence_threshold >= 55 ? '#ecc94b' : '#48bb78'}}>
+                            {aiAgent.confidence_threshold}%
+                          </span>
+                        </div>
+                        <p style={{fontSize: '10px', color: '#718096', marginBottom: '4px', lineHeight: '1.3'}}>
+                          AI will only trade when its confidence is at or above this level. Higher = fewer but stronger trades.
+                        </p>
+                        <input
+                          type="range" min={30} max={90} step={5}
+                          value={aiAgent.confidence_threshold}
+                          onChange={e => ws?.send(JSON.stringify({action: 'SET_AI_CONFIG', confidence_threshold: parseInt(e.target.value)}))}
+                          style={{width: '100%', accentColor: '#ecc94b', cursor: 'pointer'}}
+                        />
+                        <div style={{display: 'flex', justifyContent: 'space-between', fontSize: '9px', color: '#4a5568'}}>
+                          <span>30% (more trades)</span>
+                          <span>90% (high conviction)</span>
+                        </div>
+                      </div>
+
+                      {/* Max Entry Price */}
+                      <div style={{marginBottom: '6px'}}>
+                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px'}}>
+                          <span style={{fontSize: '11px', fontWeight: 600, color: '#e2e8f0'}}>Max Entry Price</span>
+                          <span style={{fontSize: '12px', fontWeight: 700, color: aiAgent.max_entry === 0 ? '#a0aec0' : '#63b3ed'}}>
+                            {aiAgent.max_entry === 0 ? 'OFF' : `${aiAgent.max_entry}¢`}
+                          </span>
+                        </div>
+                        <p style={{fontSize: '10px', color: '#718096', marginBottom: '4px', lineHeight: '1.3'}}>
+                          Block entries if token already costs more than this. Above ~70¢ means little profit margin left. Set to 0 to disable.
+                        </p>
+                        <div style={{display: 'flex', gap: '4px', flexWrap: 'wrap'}}>
+                          {[0, 60, 65, 70, 75, 80].map(v => (
+                            <button
+                              key={v}
+                              onClick={() => ws?.send(JSON.stringify({action: 'SET_AI_CONFIG', max_entry: v}))}
+                              style={{
+                                padding: '3px 8px', borderRadius: '10px', border: 'none', cursor: 'pointer',
+                                fontSize: '11px', fontWeight: 600,
+                                background: aiAgent.max_entry === v ? '#4299e1' : '#2d3748',
+                                color: aiAgent.max_entry === v ? 'white' : '#a0aec0'
+                              }}
+                            >{v === 0 ? 'OFF' : `${v}¢`}</button>
+                          ))}
+                        </div>
                       </div>
                     </div>
                   )}
