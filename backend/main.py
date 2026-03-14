@@ -1917,9 +1917,10 @@ async def _poll_live_prices():
                     market.history.append((now, market.up_price))
                     market.history = [h for h in market.history if now - h[0] <= 300]
                     print(f"[CLOB] UP={market.up_price}¢ DOWN={market.down_price}¢")
-                    return
+            # CLOB had token IDs — don't fall back to Gamma (which returns stale mid-prices)
+            return
 
-        # Paper mode (or CLOB failed): use Gamma API — works without auth, always returns live prices
+        # No token IDs yet: use Gamma API to get initial prices
         async with httpx.AsyncClient(timeout=8.0) as hclient:
             resp = await hclient.get(f"https://gamma-api.polymarket.com/events?slug={slug}")
         data = resp.json() if resp.status_code == 200 else []

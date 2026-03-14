@@ -288,18 +288,9 @@ function App() {
               });
 
               if (yesIdx !== -1 && noIdx !== -1) {
-                let upPrice = 50;
-                let downPrice = 50;
-
-                try {
-                  const prices = JSON.parse(m.outcomePrices || "[]");
-                  if (prices.length > 0) {
-                    upPrice = Math.round(parseFloat(prices[yesIdx]) * 100);
-                    downPrice = Math.round(parseFloat(prices[noIdx]) * 100);
-                  }
-                } catch (e) {
-                  console.error("Failed to parse outcome prices", e);
-                }
+                // CLOB-only pricing — never use Gamma mid-prices (they're stale/wrong)
+                let upPrice: number | null = null;
+                let downPrice: number | null = null;
 
                 if (m.clobTokenIds) {
                   try {
@@ -311,8 +302,7 @@ function App() {
                       const fetchClobPrice = async (t: string) => {
                         try {
                           const controller = new AbortController();
-                          const timeoutId = setTimeout(() => controller.abort(), 6000); // 6s to account for proxy overhead
-                          // const targetUrl = encodeURIComponent(`https://clob.polymarket.com/book?token_id=${t}`);
+                          const timeoutId = setTimeout(() => controller.abort(), 6000);
                           const res = await fetch(`http://${window.location.hostname}:8000/proxy/clob/${t}`, { signal: controller.signal });
                           clearTimeout(timeoutId);
                           if (res.ok) {
@@ -329,14 +319,16 @@ function App() {
                       };
 
                       const [upLive, downLive] = await Promise.all([fetchClobPrice(upToken), fetchClobPrice(downToken)]);
-
-                      if (upLive !== null) upPrice = upLive;
-                      if (downLive !== null) downPrice = downLive;
+                      upPrice = upLive;
+                      downPrice = downLive;
                     }
                   } catch (e) {
                     console.error("CLOB proxy lookup collapsed", e);
                   }
                 }
+
+                // Only send if CLOB returned real prices — skip if CLOB failed (avoids sending Gamma mid-prices)
+                if (upPrice === null || downPrice === null) break;
 
                 upPrice = Math.max(1, Math.min(99, upPrice));
                 downPrice = Math.max(1, Math.min(99, downPrice));
