@@ -72,7 +72,7 @@ function App() {
   const [loginPassword, setLoginPassword] = useState("");
 
   // AI Agent state
-  const [aiAgent, setAiAgent] = useState({enabled: false, model: 'claude', last_signal: 'WAIT', confidence: 0, has_key: false, state: 'idle', observe_seconds_left: 0, rescan_seconds_left: 0, block_reason: '', confidence_threshold: 55, max_entry: 70, max_spread: 8});
+  const [aiAgent, setAiAgent] = useState({enabled: false, model: 'claude', last_signal: 'WAIT', confidence: 0, has_key: false, state: 'idle', observe_seconds_left: 0, rescan_seconds_left: 0, block_reason: '', confidence_threshold: 55, max_entry: 70, max_spread: 8, clob_safe_mode: true});
   const [aiTestResult, setAiTestResult] = useState<{ok: boolean, message: string} | null>(null);
   const [aiTesting, setAiTesting] = useState(false);
 
@@ -1326,6 +1326,27 @@ function App() {
                             >{v === 0 ? 'OFF' : `${v}¢`}</button>
                           ))}
                         </div>
+                      </div>
+
+                      {/* CLOB Safe Mode */}
+                      <div style={{marginTop: '10px', padding: '10px', borderRadius: '8px', background: aiAgent.clob_safe_mode ? 'rgba(72,187,120,0.08)' : 'rgba(255,255,255,0.03)', border: `1px solid ${aiAgent.clob_safe_mode ? '#276749' : '#2d3748'}`}}>
+                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px'}}>
+                          <span style={{fontSize: '11px', fontWeight: 700, color: aiAgent.clob_safe_mode ? '#48bb78' : '#a0aec0'}}>
+                            🛡 CLOB Safe Mode
+                          </span>
+                          <button
+                            onClick={() => ws?.send(JSON.stringify({action: 'SET_AI_CONFIG', clob_safe_mode: !aiAgent.clob_safe_mode}))}
+                            style={{
+                              padding: '3px 10px', borderRadius: '12px', border: 'none', cursor: 'pointer',
+                              fontSize: '11px', fontWeight: 600,
+                              background: aiAgent.clob_safe_mode ? '#48bb78' : '#4a5568',
+                              color: 'white'
+                            }}
+                          >{aiAgent.clob_safe_mode ? 'ON' : 'OFF'}</button>
+                        </div>
+                        <p style={{fontSize: '10px', color: '#718096', lineHeight: '1.4', margin: 0}}>
+                          If Polymarket prices go offline while you're holding a position, the bot will automatically cash out to protect your money. It checks last known PnL — if down more than -$1.50, exits immediately. If recovering, waits up to 60s for prices to return. After 60s with no data, always exits.
+                        </p>
                       </div>
                     </div>
                   )}

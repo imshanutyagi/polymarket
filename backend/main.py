@@ -650,6 +650,8 @@ AI_SIGNAL_INTERVAL = 30.0    # re-query AI every 30 seconds
 ai_confidence_threshold = 55  # minimum confidence % required to place a trade (user-adjustable)
 ai_max_entry = 70             # max token price in cents allowed to enter (user-adjustable, 0=disabled)
 ai_max_spread = 8             # max bid-ask spread in cents allowed to enter (user-adjustable, 0=disabled)
+ai_clob_safe_mode = True      # if CLOB goes down while holding, auto cash-out to protect position
+ai_clob_down_since = 0.0      # timestamp when CLOB first went stale while holding (0 = not tracking)
 
 # AI Agent state machine
 AI_OBSERVE_SECONDS = 120   # 2-min initial observation
@@ -699,6 +701,7 @@ def save_settings():
         "ai_confidence_threshold": ai_confidence_threshold,
         "ai_max_entry": ai_max_entry,
         "ai_max_spread": ai_max_spread,
+        "ai_clob_safe_mode": ai_clob_safe_mode,
     }
     try:
         with open(SETTINGS_FILE, "w") as f:
@@ -711,7 +714,7 @@ def load_settings():
     global active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing
     global active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7
     global active_strategy_cpt, active_strategy_claude, global_profit_target
-    global ai_agent_enabled, ai_model, ai_api_key, ai_confidence_threshold, ai_max_entry, ai_max_spread
+    global ai_agent_enabled, ai_model, ai_api_key, ai_confidence_threshold, ai_max_entry, ai_max_spread, ai_clob_safe_mode
     try:
         if not os.path.exists(SETTINGS_FILE):
             return
@@ -735,6 +738,7 @@ def load_settings():
         ai_confidence_threshold   = int(data.get("ai_confidence_threshold", 55))
         ai_max_entry              = int(data.get("ai_max_entry", 70))
         ai_max_spread             = int(data.get("ai_max_spread", 8))
+        ai_clob_safe_mode         = bool(data.get("ai_clob_safe_mode", True))
         print(f"[SETTINGS] Loaded — active: {[k for k,v in data.items() if v is True]}")
     except Exception as e:
         print(f"[SETTINGS] Load error: {e}")
@@ -1082,7 +1086,7 @@ async def ai_direct_buy(direction: str) -> bool:
 
 async def run_ai_agent():
     """AI agent state machine: observe → enter → hold → rescan → enter."""
-    global ai_agent_state, ai_observe_start, ai_rescan_start, ai_last_query_time, ai_block_reason
+    global ai_agent_state, ai_observe_start, ai_rescan_start, ai_last_query_time, ai_block_reason, ai_clob_down_since
 
     while True:
         try:
@@ -1100,10 +1104,61 @@ async def run_ai_agent():
             has_position = portfolio.total_spent > 0
             now = time.time()
             if ai_agent_state == "holding" and not has_position:
+                ai_clob_down_since = 0.0  # reset safe mode tracker
                 ai_agent_state = "rescanning"
                 ai_rescan_start = now
                 print("[AI-AGENT] Position closed → Quick rescan...")
                 continue
+
+            # CLOB Safe Mode: if CLOB goes down while holding, protect the position
+            if ai_clob_safe_mode and ai_agent_state == "holding" and has_position:
+                clob_age = time.time() - clob_last_update_time if clob_last_update_time > 0 else float('inf')
+                if clob_age > 60:
+                    # CLOB is down — start tracking how long
+                    if ai_clob_down_since == 0.0:
+                        ai_clob_down_since = now
+                        print(f"[SAFE-MODE] CLOB went down while holding — monitoring (PnL={portfolio.total_spent:.2f})")
+
+                    clob_down_seconds = now - ai_clob_down_since
+
+                    # Calculate last known PnL from frozen prices
+                    up_val = portfolio.positions['up'] * (market.up_price / 100.0)
+                    dn_val = portfolio.positions['down'] * (market.down_price / 100.0)
+                    last_known_pnl = (up_val + dn_val) - portfolio.total_spent
+
+                    # Check trend direction from price history
+                    history = market.history[-5:] if len(market.history) >= 2 else []
+                    recovering = False
+                    if history:
+                        held_dir = "up" if portfolio.positions['up'] > 0 else "down"
+                        trend_up = history[-1][1] > history[0][1]
+                        recovering = (held_dir == "up" and trend_up) or (held_dir == "down" and not trend_up)
+
+                    ai_block_reason = f"⚠ CLOB down {int(clob_down_seconds)}s — last PnL: ${last_known_pnl:+.2f}"
+
+                    # Exit immediately if losing badly
+                    if last_known_pnl <= -1.50:
+                        print(f"[SAFE-MODE] PnL={last_known_pnl:.2f} ≤ -$1.50 — emergency cash out")
+                        portfolio.cash_out(market.up_price, market.down_price)
+                        ai_clob_down_since = 0.0
+                        continue
+
+                    # If recovering, wait up to 60s for CLOB to return
+                    if recovering and clob_down_seconds < 60:
+                        print(f"[SAFE-MODE] Recovering trend — waiting {60 - int(clob_down_seconds)}s for CLOB")
+                        continue
+
+                    # CLOB still down after 60s → cash out regardless
+                    if clob_down_seconds >= 60:
+                        print(f"[SAFE-MODE] CLOB down 60s+ — force cash out (PnL={last_known_pnl:.2f})")
+                        portfolio.cash_out(market.up_price, market.down_price)
+                        ai_clob_down_since = 0.0
+                        continue
+                else:
+                    # CLOB is back online — reset tracker
+                    if ai_clob_down_since > 0.0:
+                        print(f"[SAFE-MODE] CLOB back online after {now - ai_clob_down_since:.0f}s")
+                    ai_clob_down_since = 0.0
 
             time_left = market.get_time_left_seconds()
             if time_left < 600:  # < 10 min left, don't enter new positions
@@ -1238,6 +1293,7 @@ async def broadcast_state():
                 "confidence_threshold": ai_confidence_threshold,
                 "max_entry": ai_max_entry,
                 "max_spread": ai_max_spread,
+                "clob_safe_mode": ai_clob_safe_mode,
             }
         }
     }
@@ -2192,7 +2248,7 @@ async def websocket_endpoint(websocket: WebSocket):
             cmd = json.loads(data)
             action = cmd.get("action")
             
-            global portfolio, active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing, active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7, active_strategy_cpt, active_strategy_claude, strategy_a_strikes, global_profit_target, live_mode_enabled, live_token_ids, strategy_stats, ai_agent_enabled, ai_model, ai_api_key, ai_last_signal, ai_last_confidence, ai_last_signal_time, clob_last_update_time, ai_confidence_threshold, ai_max_entry, ai_max_spread
+            global portfolio, active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing, active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7, active_strategy_cpt, active_strategy_claude, strategy_a_strikes, global_profit_target, live_mode_enabled, live_token_ids, strategy_stats, ai_agent_enabled, ai_model, ai_api_key, ai_last_signal, ai_last_confidence, ai_last_signal_time, clob_last_update_time, ai_confidence_threshold, ai_max_entry, ai_max_spread, ai_clob_safe_mode
             current_portfolio = live_portfolio if live_mode_enabled else paper_portfolio
             portfolio = current_portfolio
             if action == "BUY_UP":
@@ -2347,6 +2403,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     ai_max_entry = max(0, min(99, int(cmd["max_entry"])))
                 if "max_spread" in cmd:
                     ai_max_spread = max(0, min(20, int(cmd["max_spread"])))
+                if "clob_safe_mode" in cmd:
+                    ai_clob_safe_mode = bool(cmd["clob_safe_mode"])
                 save_settings()
             elif action == "TEST_AI":
                 # Force a fresh AI call and send back the result immediately
