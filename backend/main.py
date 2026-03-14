@@ -1766,18 +1766,20 @@ async def _poll_live_prices():
         up_token = live_token_ids.get("up", "")
         down_token = live_token_ids.get("down", "")
 
-        # Live trading mode: use CLOB midpoint (most current, sub-second)
-        if LIVE_TRADING_AVAILABLE and up_token and down_token:
+        # Use CLOB best ask for accurate prices — no auth required for reading order book
+        if up_token and down_token:
             async with httpx.AsyncClient(timeout=5.0) as hclient:
-                up_resp = await hclient.get(f"https://clob.polymarket.com/midpoint?token_id={up_token}")
-                dn_resp = await hclient.get(f"https://clob.polymarket.com/midpoint?token_id={down_token}")
+                up_resp = await hclient.get(f"https://clob.polymarket.com/book?token_id={up_token}")
+                dn_resp = await hclient.get(f"https://clob.polymarket.com/book?token_id={down_token}")
             up_data = up_resp.json() if up_resp.status_code == 200 else {}
             dn_data = dn_resp.json() if dn_resp.status_code == 200 else {}
-            up_raw = up_data.get("mid") or up_data.get("price")
-            dn_raw = dn_data.get("mid") or dn_data.get("price")
-            if up_raw:
-                up_val = max(1, min(99, round(float(up_raw) * 100)))
-                dn_val = max(1, min(99, round(float(dn_raw) * 100))) if dn_raw else market.down_price
+            up_asks = up_data.get("asks", [])
+            dn_asks = dn_data.get("asks", [])
+            if up_asks and dn_asks:
+                up_raw = min(float(a["price"]) for a in up_asks)
+                dn_raw = min(float(a["price"]) for a in dn_asks)
+                up_val = max(1, min(99, round(up_raw * 100)))
+                dn_val = max(1, min(99, round(dn_raw * 100)))
                 is_stale = (up_val <= 5 or dn_val <= 5 or up_val >= 95 or dn_val >= 95)
                 if not is_stale:
                     market.up_price = up_val
@@ -2002,11 +2004,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     except Exception as ex:
                         await websocket.send_text(json.dumps({"type": "ai_test_result", "ok": False, "message": f"Error: {str(ex)}"}))
             elif action == "TOGGLE_LIVE_MODE":
-                if LIVE_TRADING_AVAILABLE:
-                    live_mode_enabled = not live_mode_enabled
-                    print(f"[LIVE] Trading mode: {'LIVE 🔴' if live_mode_enabled else 'PAPER 📝'}")
-                else:
+                if live_mode_enabled:
+                    # Always allow switching to paper mode
                     live_mode_enabled = False
+                    print("[LIVE] Switched to PAPER 📝")
+                elif LIVE_TRADING_AVAILABLE:
+                    live_mode_enabled = True
+                    print("[LIVE] Trading mode: LIVE 🔴")
+                else:
                     print("[LIVE] Cannot enable live mode — CLOB client not available.")
             elif action == "SET_LIVE_TOKENS":
                 up_token = cmd.get("up_token", "")
