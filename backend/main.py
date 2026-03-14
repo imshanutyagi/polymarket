@@ -973,12 +973,13 @@ async def run_ai_agent():
             if ai_agent_state == "idle":
                 ai_agent_state = "observing"
                 ai_observe_start = now
+                ai_last_query_time = 0.0  # query immediately on first tick
                 print("[AI-AGENT] Observation phase started (2 min)...")
                 continue
 
             if ai_agent_state == "observing":
-                # Query every 30 sec — enter immediately if signal found with ≥40% confidence
-                if now - ai_last_query_time >= 30:
+                # Query every 15 sec — enter immediately if signal found with ≥40% confidence
+                if now - ai_last_query_time >= 15:
                     signal = await get_ai_signal(force=True)
                     ai_last_query_time = now
                     elapsed = round(now - ai_observe_start)
