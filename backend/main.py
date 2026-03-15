@@ -111,6 +111,99 @@ async def proxy_gamma(slug: str):
     except Exception as e:
         return []
 
+@app.get("/api/debug-prices")
+async def debug_prices():
+    """Debug endpoint: compare all price sources for the current market."""
+    up_token = live_token_ids.get("up", "")
+    down_token = live_token_ids.get("down", "")
+    slug = market.live_slug if hasattr(market, 'live_slug') else ""
+    result = {
+        "slug": slug,
+        "up_token": up_token[:20] + "..." if len(up_token) > 20 else up_token,
+        "down_token": down_token[:20] + "..." if len(down_token) > 20 else down_token,
+        "bot_prices": {"up": market.up_price, "down": market.down_price},
+        "prices_loaded": market.prices_loaded,
+        "book": {"up_best_ask": None, "dn_best_ask": None, "up_asks_count": 0, "dn_asks_count": 0},
+        "price_endpoint": {"up": None, "dn": None},
+        "midpoint_endpoint": {"up": None, "dn": None},
+        "gamma": {"up": None, "dn": None},
+    }
+    if not up_token or not down_token:
+        result["error"] = "No token IDs"
+        return result
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as hc:
+            # Fetch all endpoints concurrently
+            book_up, book_dn, price_up, price_dn, mid_up, mid_dn = await asyncio.gather(
+                hc.get(f"https://clob.polymarket.com/book?token_id={up_token}"),
+                hc.get(f"https://clob.polymarket.com/book?token_id={down_token}"),
+                hc.get(f"https://clob.polymarket.com/price?token_id={up_token}&side=BUY"),
+                hc.get(f"https://clob.polymarket.com/price?token_id={down_token}&side=BUY"),
+                hc.get(f"https://clob.polymarket.com/midpoint?token_id={up_token}"),
+                hc.get(f"https://clob.polymarket.com/midpoint?token_id={down_token}"),
+                return_exceptions=True,
+            )
+            # Book
+            if not isinstance(book_up, Exception) and book_up.status_code == 200:
+                ud = book_up.json()
+                asks = ud.get("asks", [])
+                bids = ud.get("bids", [])
+                result["book"]["up_asks_count"] = len(asks)
+                result["book"]["up_bids_count"] = len(bids)
+                if asks:
+                    result["book"]["up_best_ask"] = min(float(a["price"]) for a in asks)
+                    result["book"]["up_best_ask_cents"] = round(result["book"]["up_best_ask"] * 100)
+                if bids:
+                    result["book"]["up_best_bid"] = max(float(b["price"]) for b in bids)
+            if not isinstance(book_dn, Exception) and book_dn.status_code == 200:
+                dd = book_dn.json()
+                asks = dd.get("asks", [])
+                bids = dd.get("bids", [])
+                result["book"]["dn_asks_count"] = len(asks)
+                result["book"]["dn_bids_count"] = len(bids)
+                if asks:
+                    result["book"]["dn_best_ask"] = min(float(a["price"]) for a in asks)
+                    result["book"]["dn_best_ask_cents"] = round(result["book"]["dn_best_ask"] * 100)
+                if bids:
+                    result["book"]["dn_best_bid"] = max(float(b["price"]) for b in bids)
+            # Price endpoint
+            if not isinstance(price_up, Exception) and price_up.status_code == 200:
+                result["price_endpoint"]["up"] = float(price_up.json().get("price", 0))
+                result["price_endpoint"]["up_cents"] = round(result["price_endpoint"]["up"] * 100)
+            if not isinstance(price_dn, Exception) and price_dn.status_code == 200:
+                result["price_endpoint"]["dn"] = float(price_dn.json().get("price", 0))
+                result["price_endpoint"]["dn_cents"] = round(result["price_endpoint"]["dn"] * 100)
+            # Midpoint endpoint
+            if not isinstance(mid_up, Exception) and mid_up.status_code == 200:
+                result["midpoint_endpoint"]["up"] = float(mid_up.json().get("mid", 0))
+                result["midpoint_endpoint"]["up_cents"] = round(result["midpoint_endpoint"]["up"] * 100)
+            if not isinstance(mid_dn, Exception) and mid_dn.status_code == 200:
+                result["midpoint_endpoint"]["dn"] = float(mid_dn.json().get("mid", 0))
+                result["midpoint_endpoint"]["dn_cents"] = round(result["midpoint_endpoint"]["dn"] * 100)
+            # Gamma
+            if slug:
+                try:
+                    g_resp = await hc.get(f"https://gamma-api.polymarket.com/events?slug={slug}")
+                    if g_resp.status_code == 200:
+                        g_data = g_resp.json()
+                        if g_data and len(g_data) > 0:
+                            for gm in g_data[0].get("markets", []):
+                                if not gm.get("closed") and gm.get("active"):
+                                    g_prices = json.loads(gm.get("outcomePrices", "[]"))
+                                    g_outcomes = json.loads(gm.get("outcomes", "[]"))
+                                    g_yes = next((i for i, o in enumerate(g_outcomes) if o.lower() in ("yes", "up", "above")), 0)
+                                    g_no = next((i for i, o in enumerate(g_outcomes) if o.lower() in ("no", "down", "below")), 1)
+                                    result["gamma"]["up"] = float(g_prices[g_yes])
+                                    result["gamma"]["up_cents"] = round(result["gamma"]["up"] * 100)
+                                    result["gamma"]["dn"] = float(g_prices[g_no])
+                                    result["gamma"]["dn_cents"] = round(result["gamma"]["dn"] * 100)
+                                    break
+                except Exception:
+                    pass
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
 
 @app.post("/api/login")
 async def login(body: dict):
