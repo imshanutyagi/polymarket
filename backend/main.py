@@ -2332,18 +2332,15 @@ async def auto_discover_market():
                                         print(f"[AUTO] Skipping settled market {slug} (UP:{up_price}¢ DOWN:{down_price}¢)")
                                         expired_slugs.add(slug)
                                         continue
-                                    is_stale = (up_clamped <= 5 or dn_clamped <= 5 or up_clamped >= 95 or dn_clamped >= 95)
+                                    is_settled = (up_clamped <= 1 or dn_clamped <= 1 or up_clamped >= 99 or dn_clamped >= 99)
                                     market.is_live = True
                                     market.transitioning = False  # New market found — simulator can run again
                                     market.live_slug = slug
-                                    if not is_stale:
+                                    if not is_settled:
                                         market.up_price = up_clamped
                                         market.down_price = dn_clamped
-                                        # DO NOT set prices_loaded here — Gamma returns default 50/51
-                                        # for new markets. Let _poll_live_prices() set it once CLOB
-                                        # has real orderbook data.
-                                        # market.prices_loaded = True
-                                        # clob_last_update_time = time.time()
+                                        # DO NOT set prices_loaded here — Gamma can return delayed/default prices
+                                        # Let _poll_live_prices() set it once CLOB has real orderbook data.
                                     market.cycle_duration = time_remaining
                                     market.cycle_end_time = time.time() + time_remaining
                                     market.history = []  # Clear old chart data
@@ -2420,8 +2417,10 @@ async def _poll_live_prices():
                 dn_raw = min(float(a["price"]) for a in dn_asks)
                 up_val = max(1, min(99, round(up_raw * 100)))
                 dn_val = max(1, min(99, round(dn_raw * 100)))
-                is_stale = (up_val <= 5 or dn_val <= 5 or up_val >= 95 or dn_val >= 95)
-                if not is_stale:
+                # Only reject fully settled markets (0/100 or 1/99)
+                is_settled = (up_val <= 1 or dn_val <= 1 or up_val >= 99 or dn_val >= 99)
+                if not is_settled:
+                    # ALWAYS update display prices from CLOB (even 98/3, 95/5 etc)
                     market.up_price = up_val
                     market.down_price = dn_val
                     market.prices_loaded = True
@@ -2465,11 +2464,10 @@ async def _poll_live_prices():
                                 g_no = next((i for i, o in enumerate(g_outcomes) if o.lower() in ("no", "down", "below")), 1)
                                 g_up = max(1, min(99, round(float(g_prices[g_yes]) * 100)))
                                 g_dn = max(1, min(99, round(float(g_prices[g_no]) * 100)))
-                                g_stale = (g_up <= 5 or g_dn <= 5 or g_up >= 95 or g_dn >= 95)
+                                g_settled = (g_up <= 1 or g_dn <= 1 or g_up >= 99 or g_dn >= 99)
                                 # Gamma fallback: update display prices but NEVER enable trading.
                                 # Only real CLOB orderbook data (above) should set prices_loaded.
-                                # Gamma API often returns stale/delayed/default prices for new markets.
-                                if not g_stale:
+                                if not g_settled:
                                     market.up_price = g_up
                                     market.down_price = g_dn
                                     market.current_price = market.up_price
@@ -2520,8 +2518,8 @@ async def _poll_live_prices():
                     if yes_idx != -1 and no_idx != -1 and len(prices) > max(yes_idx, no_idx):
                         up_val = max(1, min(99, round(float(prices[yes_idx]) * 100)))
                         dn_val = max(1, min(99, round(float(prices[no_idx])  * 100)))
-                        is_stale = (up_val <= 5 or dn_val <= 5 or up_val >= 95 or dn_val >= 95)
-                        if not is_stale:
+                        is_settled = (up_val <= 1 or dn_val <= 1 or up_val >= 99 or dn_val >= 99)
+                        if not is_settled:
                             market.up_price   = up_val
                             market.down_price = dn_val
                             market.prices_loaded = True
@@ -2609,8 +2607,8 @@ async def websocket_endpoint(websocket: WebSocket):
             elif action == "SYNC_LIVE_GAMMA":
                 _up = cmd.get("up_price", 50)
                 _dn = cmd.get("down_price", 50)
-                # Apply same stale filter as backend poll — reject settlement/thin-book prices
-                if not (_up <= 5 or _dn <= 5 or _up >= 95 or _dn >= 95):
+                # Only reject fully settled prices (0/1/99/100)
+                if not (_up <= 1 or _dn <= 1 or _up >= 99 or _dn >= 99):
                     market.up_price = _up
                     market.down_price = _dn
                     market.prices_loaded = True
