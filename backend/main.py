@@ -2515,15 +2515,26 @@ async def _poll_live_prices():
             dn_data = dn_resp.json() if dn_resp.status_code == 200 else {}
             up_asks = up_data.get("asks", [])
             dn_asks = dn_data.get("asks", [])
-            if up_asks and dn_asks:
-                up_raw = min(float(a["price"]) for a in up_asks)
-                dn_raw = min(float(a["price"]) for a in dn_asks)
+            has_up = bool(up_asks)
+            has_dn = bool(dn_asks)
+
+            if has_up or has_dn:
+                # Got CLOB data on at least one side
+                up_raw = min(float(a["price"]) for a in up_asks) if has_up else None
+                dn_raw = min(float(a["price"]) for a in dn_asks) if has_dn else None
+
+                # If one side missing, derive from the other (binary market: UP + DOWN ≈ 1.00)
+                if up_raw and not dn_raw:
+                    dn_raw = max(0.01, 1.0 - up_raw)
+                    print(f"[CLOB] DOWN side empty — derived from UP: {dn_raw:.2f}")
+                elif dn_raw and not up_raw:
+                    up_raw = max(0.01, 1.0 - dn_raw)
+                    print(f"[CLOB] UP side empty — derived from DOWN: {up_raw:.2f}")
+
                 up_val = max(1, min(99, round(up_raw * 100)))
                 dn_val = max(1, min(99, round(dn_raw * 100)))
-                # Only reject fully settled markets (0/100 or 1/99)
                 is_settled = (up_val <= 1 or dn_val <= 1 or up_val >= 99 or dn_val >= 99)
                 if not is_settled:
-                    # ALWAYS update display prices from CLOB (even 98/3, 95/5 etc)
                     market.up_price = up_val
                     market.down_price = dn_val
                     market.prices_loaded = True
@@ -2535,16 +2546,15 @@ async def _poll_live_prices():
                     # --- Extract liquidity/spread from order book ---
                     try:
                         up_bids = up_data.get("bids", [])
-                        # Ask liquidity: total USDC size at best ask level (UP token)
-                        best_ask_price = up_raw
-                        ask_liq = sum(float(a["size"]) for a in up_asks if abs(float(a["price"]) - best_ask_price) < 0.01)
-                        market_ask_liquidity = round(ask_liq * best_ask_price, 2)
-                        # Bid liquidity: total USDC size at best bid level (UP token)
-                        if up_bids:
+                        if has_up:
+                            best_ask_price = up_raw
+                            ask_liq = sum(float(a["size"]) for a in up_asks if abs(float(a["price"]) - best_ask_price) < 0.01)
+                            market_ask_liquidity = round(ask_liq * best_ask_price, 2)
+                        if has_up and up_bids:
                             best_bid_price = max(float(b["price"]) for b in up_bids)
                             bid_liq = sum(float(b["size"]) for b in up_bids if abs(float(b["price"]) - best_bid_price) < 0.01)
                             market_bid_liquidity = round(bid_liq * best_bid_price, 2)
-                            market_spread_cents = round((best_ask_price - best_bid_price) * 100, 1)
+                            market_spread_cents = round((up_raw - best_bid_price) * 100, 1)
                         else:
                             market_bid_liquidity = 0.0
                             market_spread_cents = 0.0
@@ -2552,8 +2562,10 @@ async def _poll_live_prices():
                         pass
                     print(f"[CLOB] UP={market.up_price}¢ DOWN={market.down_price}¢ | spread={market_spread_cents}¢ ask_liq=${market_ask_liquidity} bid_liq=${market_bid_liquidity}")
             else:
-                # CLOB orderbook empty (new market) — fall back to Gamma API prices
-                print(f"[CLOB] Orderbook empty for {slug}, falling back to Gamma API...")
+                # CLOB orderbook fully empty — fall back to Gamma API
+                # After 30 seconds of empty CLOB, accept Gamma prices for trading too
+                seconds_without_clob = time.time() - (clob_last_update_time if clob_last_update_time > 0 else market.cycle_end_time - market.cycle_duration)
+                print(f"[CLOB] Orderbook empty for {slug} ({seconds_without_clob:.0f}s without data)...")
                 try:
                     async with httpx.AsyncClient(timeout=5.0) as hclient:
                         gamma_resp = await hclient.get(f"https://gamma-api.polymarket.com/events?slug={slug}")
@@ -2568,14 +2580,17 @@ async def _poll_live_prices():
                                 g_up = max(1, min(99, round(float(g_prices[g_yes]) * 100)))
                                 g_dn = max(1, min(99, round(float(g_prices[g_no]) * 100)))
                                 g_settled = (g_up <= 1 or g_dn <= 1 or g_up >= 99 or g_dn >= 99)
-                                # Gamma fallback: update display prices but NEVER enable trading.
-                                # Only real CLOB orderbook data (above) should set prices_loaded.
                                 if not g_settled:
                                     market.up_price = g_up
                                     market.down_price = g_dn
                                     market.current_price = market.up_price
-                                    print(f"[GAMMA-FALLBACK] Display prices UP={g_up}¢ DOWN={g_dn}¢ — waiting for CLOB orderbook")
-                                    # DO NOT set prices_loaded or clob_last_update_time here
+                                    # After 30s without CLOB, accept Gamma for trading
+                                    if seconds_without_clob > 30:
+                                        market.prices_loaded = True
+                                        clob_last_update_time = time.time()
+                                        print(f"[GAMMA-FALLBACK] ENABLED trading with Gamma prices UP={g_up}¢ DOWN={g_dn}¢ (CLOB empty >{seconds_without_clob:.0f}s)")
+                                    else:
+                                        print(f"[GAMMA-FALLBACK] Display prices UP={g_up}¢ DOWN={g_dn}¢ — waiting for CLOB ({30-seconds_without_clob:.0f}s)")
                                 break
                 except Exception as e:
                     print(f"[GAMMA-FALLBACK] Error: {e}")
