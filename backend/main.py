@@ -2379,6 +2379,31 @@ async def _poll_live_prices():
         up_token = live_token_ids.get("up", "")
         down_token = live_token_ids.get("down", "")
 
+        # If token IDs missing, try to fetch them from Gamma API
+        if not up_token or not down_token:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as hclient:
+                    g_resp = await hclient.get(f"https://gamma-api.polymarket.com/events?slug={slug}")
+                g_data = g_resp.json() if g_resp.status_code == 200 else []
+                if g_data and len(g_data) > 0:
+                    for gm in g_data[0].get("markets", []):
+                        if not gm.get("closed") and gm.get("active"):
+                            g_outcomes = json.loads(gm.get("outcomes", "[]"))
+                            g_tokens = json.loads(gm.get("clobTokenIds", "[]"))
+                            if len(g_tokens) > 1 and len(g_outcomes) > 1:
+                                g_yes = next((i for i, o in enumerate(g_outcomes) if o.lower() in ("yes", "up", "above")), 0)
+                                g_no = next((i for i, o in enumerate(g_outcomes) if o.lower() in ("no", "down", "below")), 1)
+                                live_token_ids["up"] = g_tokens[g_yes]
+                                live_token_ids["down"] = g_tokens[g_no]
+                                up_token = live_token_ids["up"]
+                                down_token = live_token_ids["down"]
+                                with open("tokens.json", "w") as f:
+                                    json.dump([up_token, down_token], f)
+                                print(f"[CLOB] Fetched token IDs from Gamma for {slug}")
+                            break
+            except Exception as e:
+                print(f"[CLOB] Failed to fetch token IDs: {e}")
+
         # Use CLOB best ask for accurate prices — fetch both concurrently for speed
         if up_token and down_token:
             async with httpx.AsyncClient(timeout=5.0) as hclient:
@@ -2441,21 +2466,15 @@ async def _poll_live_prices():
                                 g_up = max(1, min(99, round(float(g_prices[g_yes]) * 100)))
                                 g_dn = max(1, min(99, round(float(g_prices[g_no]) * 100)))
                                 g_stale = (g_up <= 5 or g_dn <= 5 or g_up >= 95 or g_dn >= 95)
-                                # Reject default/initial prices (new markets start at ~50/50)
-                                g_is_default = (abs(g_up - 50) <= 2 and abs(g_dn - 50) <= 2)
-                                if not g_stale and not g_is_default:
+                                # Gamma fallback: update display prices but NEVER enable trading.
+                                # Only real CLOB orderbook data (above) should set prices_loaded.
+                                # Gamma API often returns stale/delayed/default prices for new markets.
+                                if not g_stale:
                                     market.up_price = g_up
                                     market.down_price = g_dn
-                                    market.prices_loaded = True
                                     market.current_price = market.up_price
-                                    clob_last_update_time = time.time()
-                                    market.history.append((clob_last_update_time, market.up_price))
-                                    print(f"[GAMMA-FALLBACK] UP={g_up}¢ DOWN={g_dn}¢")
-                                elif g_is_default:
-                                    # Store as display prices but don't enable trading
-                                    market.up_price = g_up
-                                    market.down_price = g_dn
-                                    print(f"[GAMMA-FALLBACK] Default prices UP={g_up}¢ DOWN={g_dn}¢ — waiting for real CLOB data")
+                                    print(f"[GAMMA-FALLBACK] Display prices UP={g_up}¢ DOWN={g_dn}¢ — waiting for CLOB orderbook")
+                                    # DO NOT set prices_loaded or clob_last_update_time here
                                 break
                 except Exception as e:
                     print(f"[GAMMA-FALLBACK] Error: {e}")
@@ -2534,7 +2553,7 @@ async def websocket_endpoint(websocket: WebSocket):
             cmd = json.loads(data)
             action = cmd.get("action")
             
-            global portfolio, active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing, active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7, active_strategy_cpt, active_strategy_claude, strategy_a_strikes, global_profit_target, live_mode_enabled, live_token_ids, strategy_stats, ai_agent_enabled, ai_model, ai_api_key, ai_last_signal, ai_last_confidence, ai_last_signal_time, clob_last_update_time, ai_confidence_threshold, ai_max_entry, ai_max_spread, ai_clob_safe_mode, ai_prompt_mode
+            global portfolio, active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing, active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7, active_strategy_cpt, active_strategy_claude, active_strategy_ncaio, strategy_a_strikes, global_profit_target, live_mode_enabled, live_token_ids, strategy_stats, ai_agent_enabled, ai_model, ai_api_key, ai_last_signal, ai_last_confidence, ai_last_signal_time, clob_last_update_time, ai_confidence_threshold, ai_max_entry, ai_max_spread, ai_clob_safe_mode, ai_prompt_mode
             current_portfolio = live_portfolio if live_mode_enabled else paper_portfolio
             portfolio = current_portfolio
             if action == "BUY_UP":
