@@ -1220,6 +1220,7 @@ async def run_ai_agent():
 
             if not ai_agent_enabled or not ai_api_key:
                 ai_agent_state = "idle"
+                ai_block_reason = ""
                 continue
 
             if not market.is_live or not market.prices_loaded:
@@ -2444,6 +2445,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 if not (_up <= 5 or _dn <= 5 or _up >= 95 or _dn >= 95):
                     market.up_price = _up
                     market.down_price = _dn
+                    if not market.prices_loaded:
+                        market.prices_loaded = True
+                        clob_last_update_time = time.time()
                 title = cmd.get("title", "Live Market")
                 
                 target_p = cmd.get("target_price", 0)
@@ -2527,6 +2531,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 save_settings()
             elif action == "TOGGLE_AI_AGENT":
                 ai_agent_enabled = not ai_agent_enabled
+                if not ai_agent_enabled:
+                    ai_agent_state = "idle"
+                    ai_block_reason = ""
                 save_settings()
             elif action == "SET_AI_CONFIG":
                 ai_model = cmd.get("model", ai_model)

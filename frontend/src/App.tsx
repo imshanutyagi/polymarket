@@ -422,8 +422,16 @@ function App() {
             if (msg.data.ai_agent) setAiAgent(msg.data.ai_agent);
 
             if (msg.data.market?.is_live && msg.data.market?.live_slug) {
-                setActiveLiveSlug((prev) => prev === "" ? msg.data.market.live_slug : prev);
-                setLiveSlugInputValue((prev) => prev === "" ? msg.data.market.live_slug : prev);
+                setActiveLiveSlug((prev) => {
+                  const newSlug = msg.data.market.live_slug;
+                  if (prev !== newSlug) return newSlug;
+                  return prev;
+                });
+                setLiveSlugInputValue((prev) => {
+                  const newSlug = msg.data.market.live_slug;
+                  if (prev !== newSlug) return newSlug;
+                  return prev;
+                });
             }
 
             const now = Math.floor(Date.now() / 1000);
