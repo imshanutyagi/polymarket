@@ -67,6 +67,9 @@ interface StrategiesData {
     profit_mode: string;
     max_trades: number;
     stop_loss: number;
+    ai_confirm: boolean;
+    ai_model: string;
+    has_ai_key: boolean;
   };
   profit_target: number;
   strikes: number;
@@ -128,7 +131,7 @@ function App() {
     balance: 10000.0, positions: { up: 0, down: 0 }, spent: { up: 0, down: 0 }, total_spent: 0, live_profit: 0, live_profit_up: 0, live_profit_down: 0, live_value_up: 0, live_value_down: 0, live_value: 0, history: []
   });
   const [strategies, setStrategies] = useState<StrategiesData>({
-    strategy_a: false, strategy_b: false, strategy_c: false, strategy_c_trailing: false, strategy_d: false, strategy_e: false, strategy_f: false, strategy_7: false, strategy_cpt: false, strategy_claude: false, claude_confidence: 0, claude_phase: 1, claude_exit_reason: '', strategy_ncaio: false, ncaio_confidence: 0, ncaio_phase: 'observing', ncaio_exit_reason: '', ncaio_active_trades: 0, ncaio_completed_trades: 0, ncaio_realized_pnl: 0, ncaio_config: { trade_size: 'medium', risk_level: 'balanced', position_flip: true, profit_mode: 'quick', max_trades: 8, stop_loss: 2.0 }, profit_target: 4.0, strikes: 0, b_done: false, live_mode: false, live_available: false
+    strategy_a: false, strategy_b: false, strategy_c: false, strategy_c_trailing: false, strategy_d: false, strategy_e: false, strategy_f: false, strategy_7: false, strategy_cpt: false, strategy_claude: false, claude_confidence: 0, claude_phase: 1, claude_exit_reason: '', strategy_ncaio: false, ncaio_confidence: 0, ncaio_phase: 'observing', ncaio_exit_reason: '', ncaio_active_trades: 0, ncaio_completed_trades: 0, ncaio_realized_pnl: 0, ncaio_config: { trade_size: 'medium', risk_level: 'balanced', position_flip: true, profit_mode: 'smart', max_trades: 8, stop_loss: 1.5, ai_confirm: false, ai_model: 'gemini-flash', has_ai_key: false }, profit_target: 4.0, strikes: 0, b_done: false, live_mode: false, live_available: false
   });
   const [strategyStats, setStrategyStats] = useState<Record<string, {trades:number;wins:number;total_profit:number;best:number;worst:number}>>({});
   const [backtestResults, setBacktestResults] = useState<{cycles:number;start_balance:number;results:Array<{key:string;label:string;final_balance:number;net_profit:number;roi_pct:number;trades:number;win_pct:number}>} | null>(null);
@@ -1218,7 +1221,7 @@ function App() {
                     <div className="flex items-center justify-between">
                       <span className="text-xs text-gray-400">Profit Mode</span>
                       <div className="flex gap-1">
-                        {[{v:'quick',l:'Quick $0.50'},{v:'patient',l:'Patient $1+'}].map(({v,l}) => (
+                        {[{v:'quick',l:'Quick $0.50'},{v:'patient',l:'Patient $1+'},{v:'smart',l:'Smart'}].map(({v,l}) => (
                           <button key={v} onClick={() => ws?.send(JSON.stringify({action:'SET_NCAIO_CONFIG',profit_mode:v}))}
                             className={`px-2 py-1 rounded text-xs font-bold ${
                               strategies.ncaio_config?.profit_mode === v ? 'bg-cyan-600 text-white' : 'bg-gray-700 text-gray-400'}`}>
@@ -1263,6 +1266,64 @@ function App() {
                         onChange={(e) => ws?.send(JSON.stringify({action:'SET_NCAIO_CONFIG',stop_loss:parseFloat(e.target.value)}))}
                         className="w-full h-1.5 rounded-lg appearance-none cursor-pointer accent-red-500"
                         style={{background: `linear-gradient(to right, #ef4444 ${((strategies.ncaio_config?.stop_loss||2)-0.5)/4.5*100}%, #374151 0%)`}} />
+                    </div>
+
+                    {/* AI Trade Confirmation */}
+                    <div className="mt-3 pt-3 border-t border-cyan-800/50">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs font-bold text-cyan-300">🤖 AI Trade Confirmation</span>
+                        <button
+                          onClick={() => ws?.send(JSON.stringify({action:'SET_NCAIO_CONFIG',ai_confirm:!strategies.ncaio_config?.ai_confirm}))}
+                          className={`px-3 py-1 rounded text-xs font-bold ${
+                            strategies.ncaio_config?.ai_confirm ? 'bg-green-600 text-white' : 'bg-gray-700 text-gray-400'}`}>
+                          {strategies.ncaio_config?.ai_confirm ? 'ON' : 'OFF'}
+                        </button>
+                      </div>
+
+                      {/* Model Selector */}
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs text-gray-400">Model</span>
+                        <select
+                          value={strategies.ncaio_config?.ai_model || 'gemini-flash'}
+                          onChange={(e) => ws?.send(JSON.stringify({action:'SET_NCAIO_CONFIG',ai_model:e.target.value}))}
+                          className="bg-gray-700 text-white text-xs rounded px-2 py-1 border border-gray-600">
+                          <optgroup label="Google">
+                            <option value="gemini-flash">Gemini Flash (fast)</option>
+                            <option value="gemini-pro">Gemini Pro</option>
+                          </optgroup>
+                          <optgroup label="Anthropic">
+                            <option value="claude-haiku">Claude Haiku (fast)</option>
+                            <option value="claude-sonnet">Claude Sonnet</option>
+                            <option value="claude-opus">Claude Opus</option>
+                          </optgroup>
+                        </select>
+                      </div>
+
+                      {/* API Key */}
+                      <div className="flex gap-1">
+                        <input
+                          type="password"
+                          placeholder={strategies.ncaio_config?.has_ai_key ? 'API key saved ✓' : 'Enter API key...'}
+                          id="ncaio-api-key"
+                          className="flex-1 bg-gray-700 text-white text-xs rounded px-2 py-1 border border-gray-600 placeholder-gray-500"
+                        />
+                        <button
+                          onClick={() => {
+                            const input = document.getElementById('ncaio-api-key') as HTMLInputElement;
+                            if (input?.value) {
+                              ws?.send(JSON.stringify({action:'SET_NCAIO_CONFIG',ncaio_api_key:input.value}));
+                              input.value = '';
+                            }
+                          }}
+                          className="px-2 py-1 bg-cyan-700 text-white text-xs rounded font-bold hover:bg-cyan-600">
+                          Save
+                        </button>
+                        <button
+                          onClick={() => ws?.send(JSON.stringify({action:'TEST_NCAIO_AI'}))}
+                          className="px-2 py-1 bg-gray-600 text-white text-xs rounded font-bold hover:bg-gray-500">
+                          Test
+                        </button>
+                      </div>
                     </div>
 
                   </div>

@@ -764,9 +764,13 @@ class NCAIOConfig:
         self.trade_size_preset: str = "medium"   # "small"=$5, "medium"=$8, "large"=$12
         self.risk_level: str = "balanced"         # "conservative", "balanced", "aggressive"
         self.position_flip_enabled: bool = True
-        self.profit_mode: str = "quick"           # "quick"=$0.50 target, "patient"=$1.00+
+        self.profit_mode: str = "smart"           # "quick"=$0.50, "patient"=$1.00+, "smart"=time-adjusted
         self.max_trades_per_cycle: int = 8
-        self.stop_loss_per_trade: float = 2.00
+        self.stop_loss_per_trade: float = 1.50    # was 2.00 — tighter to reduce loss per trade
+        # AI confirmation
+        self.ai_confirm_enabled: bool = False
+        self.ai_model: str = "gemini-flash"
+        self.ai_api_key: str = ""
 
     def get_trade_dollars(self) -> float:
         return {"small": 5.0, "medium": 8.0, "large": 12.0}.get(self.trade_size_preset, 8.0)
@@ -805,6 +809,7 @@ class NewClaudeAllInOneStrategy:
     HISTORY_WINDOW = 1200
     MAX_DRAWDOWN = -6.0
     CONSECUTIVE_LOSS_CAUTIOUS = 2
+    STOPLOSS_GRACE_SECONDS = 180  # 3-min grace period — no stop-loss on fresh trades
 
     def __init__(self):
         self.config = NCAIOConfig()
@@ -879,6 +884,48 @@ class NewClaudeAllInOneStrategy:
         if dt < 1.0:
             return 0.0
         return (recent[-1][1] - recent[0][1]) / dt
+
+    def _is_choppy_market(self) -> bool:
+        """Detect choppy/oscillating market — 6+ direction reversals in 2 min with <2c net move."""
+        now = time.time()
+        cutoff = now - 120
+        recent = [(t, p) for t, p, _, _ in self.price_history if t >= cutoff]
+        if len(recent) < 5:
+            return False
+        reversals = 0
+        for i in range(2, len(recent)):
+            d1 = recent[i - 1][1] - recent[i - 2][1]
+            d2 = recent[i][1] - recent[i - 1][1]
+            if d1 * d2 < 0:
+                reversals += 1
+        net_move = abs(recent[-1][1] - recent[0][1])
+        return reversals >= 6 and net_move < 2.0
+
+    def _min_movement_ok(self) -> bool:
+        """Require >= 2c price range in last 2 min to enter."""
+        now = time.time()
+        cutoff = now - 120
+        recent = [p for t, p, _, _ in self.price_history if t >= cutoff]
+        if len(recent) < 3:
+            return False
+        return (max(recent) - min(recent)) >= 2.0
+
+    def should_ai_confirm(self, confidence: int) -> bool:
+        """Returns True if AI confirmation should be sought before entry."""
+        if self.config.ai_confirm_enabled and self.config.ai_api_key:
+            return True
+        # Force AI confirm in recovery mode if key is available
+        if self.config.ai_api_key and self.cycle_realized_pnl < -1.0:
+            return True
+        return False
+
+    def confirm_pending_entry(self, action: dict, now: float, time_remaining: float):
+        """Called by main.py after AI confirms the trade."""
+        self._open_trade(action["side"], action["shares"], action["price"], now, time_remaining)
+
+    def cancel_pending_entry(self):
+        """Called by main.py if AI rejects the trade."""
+        pass  # Nothing to undo since trade was never opened
 
     def _compute_composite_signal(self, up_price: int, down_price: int,
                                    btc_price: float, price_to_beat: float,
@@ -1041,8 +1088,8 @@ class NewClaudeAllInOneStrategy:
                            "price": current_price, "trade_pnl": unrealized})
             return actions
 
-        # 3. STOP-LOSS + optional position flip
-        if unrealized <= -self.config.stop_loss_per_trade:
+        # 3. STOP-LOSS + optional position flip (with 3-min grace period)
+        if hold_seconds > self.STOPLOSS_GRACE_SECONDS and unrealized <= -self.config.stop_loss_per_trade:
             self._close_trade(trade, current_price, unrealized, f"stop-loss ${unrealized:.2f}")
             actions.append({"action": "market_sell", "side": side, "shares": shares,
                            "price": current_price, "trade_pnl": unrealized})
@@ -1084,6 +1131,30 @@ class NewClaudeAllInOneStrategy:
             peak = trade.get("peak_pnl", 0.0)
             if peak > 1.50 and unrealized < (peak - 0.15):
                 self._close_trade(trade, current_price, unrealized, f"trail +${unrealized:.2f}")
+                actions.append({"action": "market_sell", "side": side, "shares": shares,
+                               "price": current_price, "trade_pnl": unrealized})
+                return actions
+
+        # 5b. SMART PROFIT (time-adjusted from Claude Strategy — best of both modes)
+        if self.config.profit_mode == "smart":
+            if time_remaining <= 300:
+                target = 0.50
+            elif time_remaining <= 600:
+                target = 0.60
+            elif time_remaining <= 1800:
+                target = 0.80
+            else:
+                target = 1.00
+            # Instant sell zone: take profit when in target range
+            if target <= unrealized <= 1.50:
+                self._close_trade(trade, current_price, unrealized, f"smart +${unrealized:.2f} (target ${target:.2f})")
+                actions.append({"action": "market_sell", "side": side, "shares": shares,
+                               "price": current_price, "trade_pnl": unrealized})
+                return actions
+            # Trailing stop above $1.50 — let winners run
+            peak = trade.get("peak_pnl", 0.0)
+            if peak > 1.50 and unrealized < (peak - 0.15):
+                self._close_trade(trade, current_price, unrealized, f"smart-trail +${unrealized:.2f} (peak ${peak:.2f})")
                 actions.append({"action": "market_sell", "side": side, "shares": shares,
                                "price": current_price, "trade_pnl": unrealized})
                 return actions
@@ -1145,11 +1216,33 @@ class NewClaudeAllInOneStrategy:
         min_conf = self.config.get_min_confidence()
         if self.phase == "cautious":
             min_conf = max(min_conf, 75)
+
+        # Recovery mode: raise confidence bar after losses
+        if self.cycle_realized_pnl < 0:
+            min_conf = max(min_conf, 60)
+        if self.consecutive_losses >= 2:
+            min_conf = max(min_conf, 75)
+
         if confidence < min_conf:
             return actions
 
         entry_price = up_price if side == "up" else down_price
         if entry_price > self.config.get_max_entry_price():
+            return actions
+
+        # Choppy market filter — skip noisy oscillations
+        if self._is_choppy_market():
+            return actions
+
+        # Min movement filter — need >= 2c range to have edge
+        if not self._min_movement_ok():
+            return actions
+
+        # Momentum-against filter — don't fight strong opposite momentum
+        vel_2m = self._compute_velocity(120)
+        if side == "up" and vel_2m < -0.25:
+            return actions
+        if side == "down" and vel_2m > 0.25:
             return actions
 
         # Spread check
@@ -1172,12 +1265,26 @@ class NewClaudeAllInOneStrategy:
         dollars = self.config.get_trade_dollars()
         if time_remaining < 900:
             dollars = min(dollars, 5.0)
+
+        # Recovery sizing: if behind target and high confidence, increase slightly
+        deficit = profit_target - cycle_profit - self.cycle_realized_pnl
+        if deficit > 2.0 and confidence >= 75:
+            dollars = min(dollars * 1.25, 15.0)
+
         shares = dollars / (entry_price / 100.0)
         cost = shares * (entry_price / 100.0)
         if portfolio.balance < cost:
             shares = portfolio.balance / (entry_price / 100.0)
             cost = shares * (entry_price / 100.0)
         if shares <= 0 or cost < 0.10:
+            return actions
+
+        # AI confirmation: return pending_buy instead of opening trade
+        if self.should_ai_confirm(confidence):
+            actions.append({
+                "action": "pending_buy", "side": side, "shares": shares,
+                "price": entry_price, "confidence": confidence, "reason": reason,
+            })
             return actions
 
         self._open_trade(side, shares, entry_price, now, time_remaining)

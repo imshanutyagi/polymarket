@@ -657,6 +657,10 @@ ai_clob_safe_mode = True      # if CLOB goes down while holding, auto cash-out t
 ai_clob_down_since = 0.0      # timestamp when CLOB first went stale while holding (0 = not tracking)
 ai_prompt_mode = "auto"       # "auto" | "classic" | "balanced" | "smart"
 
+# NCAIO AI Confirmation globals
+ncaio_ai_model = "gemini-flash"
+ncaio_ai_api_key = ""
+
 # AI Agent state machine
 AI_OBSERVE_SECONDS = 120   # 2-min initial observation
 AI_RESCAN_SECONDS  = 30    # 20-40 sec quick rescan after exit
@@ -705,6 +709,9 @@ def save_settings():
         "ncaio_profit_mode": ncaio_strategy.config.profit_mode,
         "ncaio_max_trades": ncaio_strategy.config.max_trades_per_cycle,
         "ncaio_stop_loss": ncaio_strategy.config.stop_loss_per_trade,
+        "ncaio_ai_confirm": ncaio_strategy.config.ai_confirm_enabled,
+        "ncaio_ai_model": ncaio_ai_model,
+        "ncaio_ai_api_key": ncaio_ai_api_key,
         "global_profit_target": global_profit_target if global_profit_target != float('inf') else -1,
         "ai_agent_enabled": ai_agent_enabled,
         "ai_model": ai_model,
@@ -727,6 +734,7 @@ def load_settings():
     global active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7
     global active_strategy_cpt, active_strategy_claude, active_strategy_ncaio, global_profit_target
     global ai_agent_enabled, ai_model, ai_api_key, ai_confidence_threshold, ai_max_entry, ai_max_spread, ai_clob_safe_mode, ai_prompt_mode
+    global ncaio_ai_model, ncaio_ai_api_key
     try:
         if not os.path.exists(SETTINGS_FILE):
             return
@@ -748,7 +756,12 @@ def load_settings():
         ncaio_strategy.config.position_flip_enabled = data.get("ncaio_position_flip", True)
         ncaio_strategy.config.profit_mode = data.get("ncaio_profit_mode", "quick")
         ncaio_strategy.config.max_trades_per_cycle = data.get("ncaio_max_trades", 8)
-        ncaio_strategy.config.stop_loss_per_trade = data.get("ncaio_stop_loss", 2.0)
+        ncaio_strategy.config.stop_loss_per_trade = data.get("ncaio_stop_loss", 1.50)
+        ncaio_strategy.config.ai_confirm_enabled = data.get("ncaio_ai_confirm", False)
+        ncaio_ai_model = data.get("ncaio_ai_model", "gemini-flash")
+        ncaio_ai_api_key = data.get("ncaio_ai_api_key", "")
+        ncaio_strategy.config.ai_model = ncaio_ai_model
+        ncaio_strategy.config.ai_api_key = ncaio_ai_api_key
         pt = data.get("global_profit_target", 4.0)
         global_profit_target      = float('inf') if pt == -1 else float(pt)
         ai_agent_enabled          = data.get("ai_agent_enabled", False)
@@ -1153,6 +1166,72 @@ async def get_ai_signal(force: bool = False) -> str:
         return ai_last_signal
 
 
+async def get_ncaio_ai_confirmation(entry_context: dict) -> tuple:
+    """Ask AI to confirm/reject an NCAIO trade entry. Returns (confirmed: bool, reasoning: str)."""
+    global ncaio_ai_api_key, ncaio_ai_model
+    if not ncaio_ai_api_key:
+        return True, "no API key — auto-confirmed"
+
+    prompt = (
+        f"You are confirming a trade for a Polymarket BTC binary option scalper.\n\n"
+        f"PROPOSED TRADE:\n"
+        f"- Side: {entry_context.get('side', '?').upper()}\n"
+        f"- Entry price: {entry_context.get('price', 0)}c\n"
+        f"- Composite confidence: {entry_context.get('confidence', 0)}%\n"
+        f"- Signal reasons: {entry_context.get('reason', '?')}\n"
+        f"- BTC price: ${entry_context.get('btc_price', 0):.0f}\n"
+        f"- Target (price to beat): ${entry_context.get('price_to_beat', 0):.0f}\n"
+        f"- Time remaining: {int(entry_context.get('time_remaining', 0) / 60)} min\n"
+        f"- Cycle P&L so far: ${entry_context.get('cycle_pnl', 0):.2f}\n\n"
+        f"Should this trade be executed? Consider:\n"
+        f"- Does BTC price direction strongly support the chosen side?\n"
+        f"- Is the confidence score adequate (>40%)?\n"
+        f"- Is there enough time remaining (>10 min)?\n"
+        f"- Is the entry price reasonable (<55c)?\n\n"
+        f"Reply with ONLY one word: CONFIRM or REJECT"
+    )
+
+    CLAUDE_MODEL_IDS = {
+        "claude-haiku": "claude-haiku-4-5-20251001",
+        "claude-sonnet": "claude-sonnet-4-6",
+        "claude-opus": "claude-opus-4-6",
+    }
+    GEMINI_MODEL_IDS = {
+        "gemini-flash": "gemini-2.0-flash",
+        "gemini-pro": "gemini-2.0-pro-exp",
+    }
+
+    try:
+        if ncaio_ai_model in CLAUDE_MODEL_IDS:
+            model_id = CLAUDE_MODEL_IDS[ncaio_ai_model]
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={"x-api-key": ncaio_ai_api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                    json={"model": model_id, "max_tokens": 10,
+                          "messages": [{"role": "user", "content": prompt}]}
+                )
+                data = resp.json()
+                text = data.get("content", [{}])[0].get("text", "CONFIRM").strip().upper()
+        else:  # gemini
+            model_id = GEMINI_MODEL_IDS.get(ncaio_ai_model, "gemini-2.0-flash")
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={ncaio_ai_api_key}",
+                    json={"contents": [{"parts": [{"text": prompt}]}],
+                          "generationConfig": {"maxOutputTokens": 10}}
+                )
+                data = resp.json()
+                text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "CONFIRM").strip().upper()
+
+        confirmed = "CONFIRM" in text
+        print(f"[NCAIO-AI] {text} | model={ncaio_ai_model} | side={entry_context.get('side')}")
+        return confirmed, text
+    except Exception as e:
+        print(f"[NCAIO-AI] Timeout/error: {e} — auto-confirming")
+        return True, f"timeout: {e}"
+
+
 async def ai_direct_buy(direction: str) -> bool:
     """AI agent places a direct buy with time-based order size limits."""
     global portfolio, ai_block_reason, position_entry_time, position_entry_time_left_min
@@ -1431,6 +1510,9 @@ async def broadcast_state():
                     "profit_mode": ncaio_strategy.config.profit_mode,
                     "max_trades": ncaio_strategy.config.max_trades_per_cycle,
                     "stop_loss": ncaio_strategy.config.stop_loss_per_trade,
+                    "ai_confirm": ncaio_strategy.config.ai_confirm_enabled,
+                    "ai_model": ncaio_ai_model,
+                    "has_ai_key": bool(ncaio_ai_api_key),
                 },
                 "profit_target": global_profit_target if global_profit_target != float('inf') else -1,
                 "strikes": strategy_a_strikes,
@@ -2157,6 +2239,27 @@ async def market_loop():
                     spread_cents=market_spread_cents
                 )
                 for act in ncaio_actions:
+                    # AI CONFIRMATION — intercept pending_buy actions
+                    if act["action"] == "pending_buy":
+                        ctx = {
+                            "side": act["side"], "price": act["price"],
+                            "confidence": act.get("confidence", 0),
+                            "reason": act.get("reason", ""),
+                            "btc_price": market.btc_price,
+                            "price_to_beat": market.price_to_beat,
+                            "time_remaining": time_left,
+                            "cycle_pnl": ncaio_strategy.cycle_realized_pnl,
+                        }
+                        confirmed, reasoning = await get_ncaio_ai_confirmation(ctx)
+                        if confirmed:
+                            ncaio_strategy.confirm_pending_entry(act, time.time(), time_left)
+                            act["action"] = "limit_buy_fill"  # process as normal buy
+                            print(f"[NCAIO-AI] CONFIRMED {act['side'].upper()} @ {act['price']}c — {reasoning}")
+                        else:
+                            ncaio_strategy.cancel_pending_entry()
+                            print(f"[NCAIO-AI] REJECTED {act['side'].upper()} @ {act['price']}c — {reasoning}")
+                            continue  # skip this action
+
                     if act["action"] in ["market_sell", "limit_sell_fill"]:
                         revenue = act["shares"] * (act["price"] / 100.0)
                         portfolio.balance += revenue
@@ -2551,7 +2654,7 @@ async def websocket_endpoint(websocket: WebSocket):
             cmd = json.loads(data)
             action = cmd.get("action")
             
-            global portfolio, active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing, active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7, active_strategy_cpt, active_strategy_claude, active_strategy_ncaio, strategy_a_strikes, global_profit_target, live_mode_enabled, live_token_ids, strategy_stats, ai_agent_enabled, ai_model, ai_api_key, ai_last_signal, ai_last_confidence, ai_last_signal_time, clob_last_update_time, ai_confidence_threshold, ai_max_entry, ai_max_spread, ai_clob_safe_mode, ai_prompt_mode
+            global portfolio, active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing, active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7, active_strategy_cpt, active_strategy_claude, active_strategy_ncaio, strategy_a_strikes, global_profit_target, live_mode_enabled, live_token_ids, strategy_stats, ai_agent_enabled, ai_model, ai_api_key, ai_last_signal, ai_last_confidence, ai_last_signal_time, clob_last_update_time, ai_confidence_threshold, ai_max_entry, ai_max_spread, ai_clob_safe_mode, ai_prompt_mode, ncaio_ai_model, ncaio_ai_api_key
             current_portfolio = live_portfolio if live_mode_enabled else paper_portfolio
             portfolio = current_portfolio
             if action == "BUY_UP":
@@ -2720,7 +2823,27 @@ async def websocket_endpoint(websocket: WebSocket):
                     cfg.max_trades_per_cycle = max(1, min(20, int(cmd["max_trades"])))
                 if "stop_loss" in cmd:
                     cfg.stop_loss_per_trade = max(0.5, min(5.0, float(cmd["stop_loss"])))
+                if "ai_confirm" in cmd:
+                    cfg.ai_confirm_enabled = bool(cmd["ai_confirm"])
+                if "ai_model" in cmd:
+                    ncaio_ai_model = cmd["ai_model"]
+                    cfg.ai_model = cmd["ai_model"]
+                if "ncaio_api_key" in cmd:
+                    key = cmd["ncaio_api_key"]
+                    if key:
+                        ncaio_ai_api_key = key
+                        cfg.ai_api_key = key
                 save_settings()
+            elif action == "TEST_NCAIO_AI":
+                if not ncaio_ai_api_key:
+                    await websocket.send_text(json.dumps({"type": "ncaio_ai_test", "ok": False, "message": "No API key saved."}))
+                else:
+                    try:
+                        test_ctx = {"side": "up", "price": 50, "confidence": 70, "reason": "test signal", "btc_price": market.btc_price, "price_to_beat": market.price_to_beat, "time_remaining": 1800, "cycle_pnl": 0}
+                        ok, msg = await get_ncaio_ai_confirmation(test_ctx)
+                        await websocket.send_text(json.dumps({"type": "ncaio_ai_test", "ok": True, "message": f"{'CONFIRM' if ok else 'REJECT'} — model: {ncaio_ai_model}"}))
+                    except Exception as ex:
+                        await websocket.send_text(json.dumps({"type": "ncaio_ai_test", "ok": False, "message": str(ex)}))
             elif action == "TOGGLE_AI_AGENT":
                 ai_agent_enabled = not ai_agent_enabled
                 if not ai_agent_enabled:
