@@ -2132,7 +2132,8 @@ async def stream_live_prices():
 async def auto_discover_market():
     """Automatically discover and sync with the current Polymarket BTC Up/Down market."""
     global live_token_ids, clob_last_update_time
-    
+    expired_slugs = set()  # Track all expired slugs to never reconnect to them
+
     while True:
         try:
             if market.is_live and market.get_time_left_seconds() > 30:
@@ -2144,6 +2145,8 @@ async def auto_discover_market():
             old_slug = market.live_slug
             if market.is_live:
                 print(f"[AUTO] Cycle ended for {old_slug}, discovering new market...")
+                if old_slug:
+                    expired_slugs.add(old_slug)
                 market.is_live = False
                 market.transitioning = True   # Blocks simulator from setting 1c/99c settlement prices
                 market.live_slug = ""
@@ -2181,8 +2184,8 @@ async def auto_discover_market():
 
             found_new = False
             for slug in slugs_to_try:
-                if slug == old_slug:
-                    continue  # Skip the expired market slug
+                if slug in expired_slugs:
+                    continue  # Skip any previously expired market slug
                 try:
                     async with httpx.AsyncClient() as client:
                         resp = await client.get(
@@ -2221,6 +2224,12 @@ async def auto_discover_market():
                                     # Set market state for new cycle (reject stale/thin-book prices)
                                     up_clamped = max(1, min(99, up_price))
                                     dn_clamped = max(1, min(99, down_price))
+                                    is_settled = (up_price <= 1 or down_price <= 1 or up_price >= 99 or down_price >= 99)
+                                    if is_settled:
+                                        # This market is already settled — skip it
+                                        print(f"[AUTO] Skipping settled market {slug} (UP:{up_price}¢ DOWN:{down_price}¢)")
+                                        expired_slugs.add(slug)
+                                        continue
                                     is_stale = (up_clamped <= 5 or dn_clamped <= 5 or up_clamped >= 95 or dn_clamped >= 95)
                                     market.is_live = True
                                     market.transitioning = False  # New market found — simulator can run again
