@@ -2339,8 +2339,11 @@ async def auto_discover_market():
                                     if not is_stale:
                                         market.up_price = up_clamped
                                         market.down_price = dn_clamped
-                                        market.prices_loaded = True
-                                        clob_last_update_time = time.time()  # Allow AI agent to trade immediately
+                                        # DO NOT set prices_loaded here — Gamma returns default 50/51
+                                        # for new markets. Let _poll_live_prices() set it once CLOB
+                                        # has real orderbook data.
+                                        # market.prices_loaded = True
+                                        # clob_last_update_time = time.time()
                                     market.cycle_duration = time_remaining
                                     market.cycle_end_time = time.time() + time_remaining
                                     market.history = []  # Clear old chart data
@@ -2438,7 +2441,9 @@ async def _poll_live_prices():
                                 g_up = max(1, min(99, round(float(g_prices[g_yes]) * 100)))
                                 g_dn = max(1, min(99, round(float(g_prices[g_no]) * 100)))
                                 g_stale = (g_up <= 5 or g_dn <= 5 or g_up >= 95 or g_dn >= 95)
-                                if not g_stale:
+                                # Reject default/initial prices (new markets start at ~50/50)
+                                g_is_default = (abs(g_up - 50) <= 2 and abs(g_dn - 50) <= 2)
+                                if not g_stale and not g_is_default:
                                     market.up_price = g_up
                                     market.down_price = g_dn
                                     market.prices_loaded = True
@@ -2446,6 +2451,11 @@ async def _poll_live_prices():
                                     clob_last_update_time = time.time()
                                     market.history.append((clob_last_update_time, market.up_price))
                                     print(f"[GAMMA-FALLBACK] UP={g_up}¢ DOWN={g_dn}¢")
+                                elif g_is_default:
+                                    # Store as display prices but don't enable trading
+                                    market.up_price = g_up
+                                    market.down_price = g_dn
+                                    print(f"[GAMMA-FALLBACK] Default prices UP={g_up}¢ DOWN={g_dn}¢ — waiting for real CLOB data")
                                 break
                 except Exception as e:
                     print(f"[GAMMA-FALLBACK] Error: {e}")
