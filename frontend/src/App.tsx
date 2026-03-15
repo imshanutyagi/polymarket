@@ -53,6 +53,21 @@ interface StrategiesData {
   claude_confidence: number;
   claude_phase: number;
   claude_exit_reason: string;
+  strategy_ncaio: boolean;
+  ncaio_confidence: number;
+  ncaio_phase: string;
+  ncaio_exit_reason: string;
+  ncaio_active_trades: number;
+  ncaio_completed_trades: number;
+  ncaio_realized_pnl: number;
+  ncaio_config: {
+    trade_size: string;
+    risk_level: string;
+    position_flip: boolean;
+    profit_mode: string;
+    max_trades: number;
+    stop_loss: number;
+  };
   profit_target: number;
   strikes: number;
   b_done: boolean;
@@ -113,7 +128,7 @@ function App() {
     balance: 10000.0, positions: { up: 0, down: 0 }, spent: { up: 0, down: 0 }, total_spent: 0, live_profit: 0, live_profit_up: 0, live_profit_down: 0, live_value_up: 0, live_value_down: 0, live_value: 0, history: []
   });
   const [strategies, setStrategies] = useState<StrategiesData>({
-    strategy_a: false, strategy_b: false, strategy_c: false, strategy_c_trailing: false, strategy_d: false, strategy_e: false, strategy_f: false, strategy_7: false, strategy_cpt: false, strategy_claude: false, claude_confidence: 0, claude_phase: 1, claude_exit_reason: '', profit_target: 4.0, strikes: 0, b_done: false, live_mode: false, live_available: false
+    strategy_a: false, strategy_b: false, strategy_c: false, strategy_c_trailing: false, strategy_d: false, strategy_e: false, strategy_f: false, strategy_7: false, strategy_cpt: false, strategy_claude: false, claude_confidence: 0, claude_phase: 1, claude_exit_reason: '', strategy_ncaio: false, ncaio_confidence: 0, ncaio_phase: 'observing', ncaio_exit_reason: '', ncaio_active_trades: 0, ncaio_completed_trades: 0, ncaio_realized_pnl: 0, ncaio_config: { trade_size: 'medium', risk_level: 'balanced', position_flip: true, profit_mode: 'quick', max_trades: 8, stop_loss: 2.0 }, profit_target: 4.0, strikes: 0, b_done: false, live_mode: false, live_available: false
   });
   const [strategyStats, setStrategyStats] = useState<Record<string, {trades:number;wins:number;total_profit:number;best:number;worst:number}>>({});
   const [backtestResults, setBacktestResults] = useState<{cycles:number;start_balance:number;results:Array<{key:string;label:string;final_balance:number;net_profit:number;roi_pct:number;trades:number;win_pct:number}>} | null>(null);
@@ -525,7 +540,7 @@ function App() {
     if (ws) ws.send(JSON.stringify({ action: "BUY_DOWN", shares: 10 }));
   };
 
-  const toggleStrategy = (strategy: 'A' | 'B' | 'C' | 'C_TRAILING' | 'D' | 'E' | 'F' | '7' | 'CPT' | 'CLAUDE') => {
+  const toggleStrategy = (strategy: 'A' | 'B' | 'C' | 'C_TRAILING' | 'D' | 'E' | 'F' | '7' | 'CPT' | 'CLAUDE' | 'NCAIO') => {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ action: `TOGGLE_STRATEGY_${strategy}` }));
     }
@@ -864,7 +879,7 @@ function App() {
                       strategy_c: "Fixed Target", strategy_c_trailing: "C+Trailing",
                       strategy_d: "Strategy D", strategy_e: "Strategy E",
                       strategy_f: "Strategy F", strategy_7: "Strategy 7",
-                      strategy_cpt: "CPT", strategy_claude: "Claude AI"
+                      strategy_cpt: "CPT", strategy_claude: "Claude AI", strategy_ncaio: "NCAIO"
                     };
                     return STAT_KEYS.map(key => {
                       const s = strategyStats[key] ?? {trades:0,wins:0,total_profit:0,best:0,worst:0};
@@ -1105,6 +1120,155 @@ function App() {
               <Settings2 className="w-5 h-5 mr-3 text-indigo-400" />
               Bot Strategies
             </h2>
+
+            {/* ═══ NEW CLAUDE ALL-IN-ONE STRATEGY ═══ */}
+            <div
+              onClick={() => toggleStrategy('NCAIO')}
+              className={`p-4 rounded-xl border cursor-pointer transition-colors ${strategies.strategy_ncaio
+                ? 'bg-cyan-900/40 border-cyan-500 shadow-[0_0_15px_rgba(6,182,212,0.3)]'
+                : 'bg-gray-800 border-gray-700 hover:border-gray-500'
+                }`}
+            >
+              <div className="flex justify-between items-start mb-2">
+                <h3 className={`font-bold ${strategies.strategy_ncaio ? 'text-cyan-300' : 'text-gray-300'}`}>
+                  🚀 New Claude All-in-One
+                </h3>
+                <div className={`w-5 h-5 rounded-full border flex items-center justify-center ${strategies.strategy_ncaio
+                  ? 'bg-cyan-500 border-cyan-500 text-white' : 'border-gray-600'}`}>
+                  {strategies.strategy_ncaio && <Check className="w-3 h-3" />}
+                </div>
+              </div>
+              <p className="text-xs text-gray-400 mb-2">
+                Unified BTC-price + EMA + RSI + velocity. Multi-trade scalping with position flip. Target $4/hr.
+              </p>
+              {strategies.strategy_ncaio && (
+                <div onClick={(e) => e.stopPropagation()}>
+                  {/* Phase + Confidence + Trades badges */}
+                  <div className="flex flex-wrap gap-2 mb-3">
+                    <span className={`px-2 py-1 rounded-full text-xs font-bold ${
+                      strategies.ncaio_phase === 'active' ? 'bg-green-900/60 text-green-400' :
+                      strategies.ncaio_phase === 'observing' ? 'bg-yellow-900/60 text-yellow-400' :
+                      strategies.ncaio_phase === 'cautious' ? 'bg-orange-900/60 text-orange-400' :
+                      'bg-red-900/60 text-red-400'
+                    }`}>
+                      {strategies.ncaio_phase === 'observing' ? '👁 Observing' :
+                       strategies.ncaio_phase === 'active' ? '⚡ Active' :
+                       strategies.ncaio_phase === 'cautious' ? '⚠️ Cautious' : '🛑 Exit Only'}
+                    </span>
+                    <span className={`px-2 py-1 rounded-full text-xs font-bold ${
+                      strategies.ncaio_confidence >= 75 ? 'bg-green-900/60 text-green-400' :
+                      strategies.ncaio_confidence >= 50 ? 'bg-yellow-900/60 text-yellow-400' :
+                      'bg-gray-800 text-gray-500'
+                    }`}>
+                      Confidence: {strategies.ncaio_confidence}%
+                    </span>
+                    <span className="px-2 py-1 rounded-full text-xs font-bold bg-cyan-900/60 text-cyan-400">
+                      Trades: {strategies.ncaio_completed_trades}/{strategies.ncaio_config?.max_trades || 8}
+                    </span>
+                  </div>
+
+                  {/* Realized P&L */}
+                  <div className={`text-sm font-bold mb-3 ${
+                    strategies.ncaio_realized_pnl > 0 ? 'text-green-400' :
+                    strategies.ncaio_realized_pnl < 0 ? 'text-red-400' : 'text-gray-400'
+                  }`}>
+                    Cycle P&L: ${strategies.ncaio_realized_pnl?.toFixed(2) || '0.00'}
+                    {strategies.ncaio_active_trades > 0 && <span className="text-cyan-400 ml-2">● Holding</span>}
+                  </div>
+
+                  {/* Exit reason */}
+                  {strategies.ncaio_exit_reason && (
+                    <div className="text-xs text-cyan-400 bg-gray-800 rounded px-2 py-1 mb-3">
+                      Last: {strategies.ncaio_exit_reason}
+                    </div>
+                  )}
+
+                  {/* ── Config Controls ── */}
+                  <div className="space-y-3 mt-3 border-t border-gray-700 pt-3">
+
+                    {/* Trade Size */}
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-gray-400">Trade Size</span>
+                      <div className="flex gap-1">
+                        {[{v:'small',l:'$5'},{v:'medium',l:'$8'},{v:'large',l:'$12'}].map(({v,l}) => (
+                          <button key={v} onClick={() => ws?.send(JSON.stringify({action:'SET_NCAIO_CONFIG',trade_size:v}))}
+                            className={`px-2 py-1 rounded text-xs font-bold ${
+                              strategies.ncaio_config?.trade_size === v ? 'bg-cyan-600 text-white' : 'bg-gray-700 text-gray-400'}`}>
+                            {l}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Risk Level */}
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-gray-400">Risk Level</span>
+                      <div className="flex gap-1">
+                        {[{v:'conservative',l:'Safe'},{v:'balanced',l:'Balanced'},{v:'aggressive',l:'Aggressive'}].map(({v,l}) => (
+                          <button key={v} onClick={() => ws?.send(JSON.stringify({action:'SET_NCAIO_CONFIG',risk_level:v}))}
+                            className={`px-2 py-1 rounded text-xs font-bold ${
+                              strategies.ncaio_config?.risk_level === v ? 'bg-cyan-600 text-white' : 'bg-gray-700 text-gray-400'}`}>
+                            {l}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Profit Mode */}
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-gray-400">Profit Mode</span>
+                      <div className="flex gap-1">
+                        {[{v:'quick',l:'Quick $0.50'},{v:'patient',l:'Patient $1+'}].map(({v,l}) => (
+                          <button key={v} onClick={() => ws?.send(JSON.stringify({action:'SET_NCAIO_CONFIG',profit_mode:v}))}
+                            className={`px-2 py-1 rounded text-xs font-bold ${
+                              strategies.ncaio_config?.profit_mode === v ? 'bg-cyan-600 text-white' : 'bg-gray-700 text-gray-400'}`}>
+                            {l}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Position Flip */}
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-gray-400">Position Flip</span>
+                      <button
+                        onClick={() => ws?.send(JSON.stringify({action:'SET_NCAIO_CONFIG',position_flip:!strategies.ncaio_config?.position_flip}))}
+                        className={`px-3 py-1 rounded text-xs font-bold ${
+                          strategies.ncaio_config?.position_flip ? 'bg-green-600 text-white' : 'bg-gray-700 text-gray-400'}`}>
+                        {strategies.ncaio_config?.position_flip ? 'ON' : 'OFF'}
+                      </button>
+                    </div>
+
+                    {/* Max Trades Slider */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-xs text-gray-400">Max Trades/Cycle</span>
+                        <span className="text-xs font-bold text-cyan-400">{strategies.ncaio_config?.max_trades || 8}</span>
+                      </div>
+                      <input type="range" min="1" max="20" step="1"
+                        value={strategies.ncaio_config?.max_trades || 8}
+                        onChange={(e) => ws?.send(JSON.stringify({action:'SET_NCAIO_CONFIG',max_trades:parseInt(e.target.value)}))}
+                        className="w-full h-1.5 rounded-lg appearance-none cursor-pointer accent-cyan-500"
+                        style={{background: `linear-gradient(to right, #06b6d4 ${((strategies.ncaio_config?.max_trades||8)-1)/19*100}%, #374151 0%)`}} />
+                    </div>
+
+                    {/* Stop-Loss Slider */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-xs text-gray-400">Stop-Loss</span>
+                        <span className="text-xs font-bold text-red-400">${(strategies.ncaio_config?.stop_loss || 2).toFixed(1)}</span>
+                      </div>
+                      <input type="range" min="0.5" max="5" step="0.5"
+                        value={strategies.ncaio_config?.stop_loss || 2}
+                        onChange={(e) => ws?.send(JSON.stringify({action:'SET_NCAIO_CONFIG',stop_loss:parseFloat(e.target.value)}))}
+                        className="w-full h-1.5 rounded-lg appearance-none cursor-pointer accent-red-500"
+                        style={{background: `linear-gradient(to right, #ef4444 ${((strategies.ncaio_config?.stop_loss||2)-0.5)/4.5*100}%, #374151 0%)`}} />
+                    </div>
+
+                  </div>
+                </div>
+              )}
+            </div>
 
             {/* Claude Strategy: AI Confluence — pinned to top */}
             <div

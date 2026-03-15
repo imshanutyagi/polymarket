@@ -750,3 +750,436 @@ class ClaudeStrategy:
             self.profit_ever_hit_target = False
 
         return actions
+
+
+# ============================================================================
+#  NEW CLAUDE ALL-IN-ONE STRATEGY
+#  Unified BTC-price + technical strategy. Multi-trade scalping with position
+#  flip. Target $4/hr through 4-8 small trades.
+# ============================================================================
+
+class NCAIOConfig:
+    """User-adjustable config sent from frontend."""
+    def __init__(self):
+        self.trade_size_preset: str = "medium"   # "small"=$5, "medium"=$8, "large"=$12
+        self.risk_level: str = "balanced"         # "conservative", "balanced", "aggressive"
+        self.position_flip_enabled: bool = True
+        self.profit_mode: str = "quick"           # "quick"=$0.50 target, "patient"=$1.00+
+        self.max_trades_per_cycle: int = 8
+        self.stop_loss_per_trade: float = 2.00
+
+    def get_trade_dollars(self) -> float:
+        return {"small": 5.0, "medium": 8.0, "large": 12.0}.get(self.trade_size_preset, 8.0)
+
+    def get_min_signals(self) -> int:
+        return {"conservative": 3, "balanced": 2, "aggressive": 1}.get(self.risk_level, 2)
+
+    def get_max_entry_price(self) -> int:
+        return {"conservative": 50, "balanced": 55, "aggressive": 60}.get(self.risk_level, 55)
+
+    def get_min_confidence(self) -> int:
+        return {"conservative": 45, "balanced": 30, "aggressive": 15}.get(self.risk_level, 30)
+
+
+class NewClaudeAllInOneStrategy:
+    """
+    New Claude All-in-One: Unified BTC-price + Technical Strategy
+
+    Core design:
+    - BTC price vs target as PRIMARY signal (40% weight)
+    - EMA crossover + RSI + velocity + entry zone as secondary signals
+    - Multiple small trades per cycle ($5-12 each, target $0.50-$1.00 profit)
+    - Position flip on stop-loss when velocity confirms reversal
+    - Internal 20-min price history buffer
+    - Spread-aware execution
+    - Market-condition-based phases (not just time-based)
+    """
+
+    EMA_FAST_ALPHA = 2.0 / 16.0   # 15-tick EMA
+    EMA_SLOW_ALPHA = 2.0 / 46.0   # 45-tick EMA
+    RSI_PERIOD = 14
+    ANTI_WHIPSAW_SECONDS = 20.0
+    FLIP_COOLDOWN_SECONDS = 60.0
+    TIMEOUT_MINUTES = 8
+    OBSERVE_SECONDS = 120
+    HISTORY_WINDOW = 1200
+    MAX_DRAWDOWN = -6.0
+    CONSECUTIVE_LOSS_CAUTIOUS = 2
+
+    def __init__(self):
+        self.config = NCAIOConfig()
+        self.trades: list = []
+        self.trade_counter = 0
+        self.completed_trade_count = 0
+        self.consecutive_losses = 0
+        self.held_positions = {'up': 0.0, 'down': 0.0}
+        self.held_avg_cost = {'up': 0.0, 'down': 0.0}
+        self.price_history: list = []
+        self.ema_fast = None
+        self.ema_slow = None
+        self.rsi_prices: list = []
+        self.tick_count = 0
+        self.phase = "observing"
+        self.confidence = 0
+        self.cycle_start_time = 0.0
+        self.last_entry_time = 0.0
+        self.last_flip_time = 0.0
+        self.exit_reason = ""
+        self.cycle_realized_pnl = 0.0
+        self.estimated_spread = 3.0
+
+    def reset_state(self, full_reset: bool = False):
+        self.trades = []
+        self.trade_counter = 0
+        self.completed_trade_count = 0
+        self.consecutive_losses = 0
+        self.held_positions = {'up': 0.0, 'down': 0.0}
+        self.held_avg_cost = {'up': 0.0, 'down': 0.0}
+        self.last_entry_time = 0.0
+        self.last_flip_time = 0.0
+        self.exit_reason = ""
+        self.cycle_realized_pnl = 0.0
+        if full_reset:
+            self.ema_fast = None
+            self.ema_slow = None
+            self.rsi_prices = []
+            self.tick_count = 0
+            self.confidence = 0
+            self.phase = "observing"
+            self.cycle_start_time = 0.0
+            self.price_history = []
+
+    def _update_ema(self, price: float):
+        if self.ema_fast is None:
+            self.ema_fast = price
+            self.ema_slow = price
+        else:
+            self.ema_fast += self.EMA_FAST_ALPHA * (price - self.ema_fast)
+            self.ema_slow += self.EMA_SLOW_ALPHA * (price - self.ema_slow)
+
+    def _compute_rsi(self) -> float:
+        if len(self.rsi_prices) < self.RSI_PERIOD + 1:
+            return 50.0
+        changes = [self.rsi_prices[i] - self.rsi_prices[i - 1]
+                    for i in range(len(self.rsi_prices) - self.RSI_PERIOD, len(self.rsi_prices))]
+        gains = [c for c in changes if c > 0]
+        losses = [-c for c in changes if c < 0]
+        avg_gain = sum(gains) / self.RSI_PERIOD if gains else 0.001
+        avg_loss = sum(losses) / self.RSI_PERIOD if losses else 0.001
+        rs = avg_gain / avg_loss
+        return 100.0 - (100.0 / (1.0 + rs))
+
+    def _compute_velocity(self, window_sec: float) -> float:
+        now = time.time()
+        cutoff = now - window_sec
+        recent = [(t, p) for t, p, _, _ in self.price_history if t >= cutoff]
+        if len(recent) < 2:
+            return 0.0
+        dt = recent[-1][0] - recent[0][0]
+        if dt < 1.0:
+            return 0.0
+        return (recent[-1][1] - recent[0][1]) / dt
+
+    def _compute_composite_signal(self, up_price: int, down_price: int,
+                                   btc_price: float, price_to_beat: float,
+                                   time_remaining: float) -> tuple:
+        total_score = 0.0
+        reasons = []
+
+        # Signal 1: BTC price vs target (weight: 40)
+        if btc_price > 0 and price_to_beat > 0:
+            delta = btc_price - price_to_beat
+            time_factor = min(1.0, time_remaining / 3600.0) * 1.5
+            btc_signal = max(-40.0, min(40.0, (delta / 10.0) * time_factor))
+            if abs(btc_signal) > 5:
+                reasons.append(f"BTC ${abs(delta):.0f} {'above' if delta > 0 else 'below'}")
+            total_score += btc_signal
+
+        # Signal 2: EMA crossover (weight: 20)
+        if self.ema_fast is not None and self.ema_slow is not None:
+            ema_diff = self.ema_fast - self.ema_slow
+            if abs(ema_diff) > 0.3:
+                ema_signal = max(-20.0, min(20.0, ema_diff * 20.0))
+                reasons.append(f"EMA {'bull' if ema_diff > 0 else 'bear'}")
+                total_score += ema_signal
+
+        # Signal 3: Price velocity (weight: 15)
+        vel_2m = self._compute_velocity(120)
+        vel_5m = self._compute_velocity(300)
+        if abs(vel_2m) > 0.1:
+            vel_signal = max(-15.0, min(15.0, vel_2m * 50.0))
+            if vel_5m * vel_2m > 0:
+                vel_signal *= 1.2
+            else:
+                vel_signal *= 0.6
+            vel_signal = max(-15.0, min(15.0, vel_signal))
+            reasons.append(f"vel {vel_2m:+.2f}c/s")
+            total_score += vel_signal
+
+        # Signal 4: RSI (weight: 10)
+        rsi = self._compute_rsi()
+        if rsi > 70:
+            total_score += -min(10.0, (rsi - 70) * 0.33)
+            reasons.append(f"RSI {rsi:.0f}")
+        elif rsi < 30:
+            total_score += min(10.0, (30 - rsi) * 0.33)
+            reasons.append(f"RSI {rsi:.0f}")
+        else:
+            total_score += (rsi - 50) * 0.1
+
+        # Signal 5: Entry zone (weight: 15)
+        entry_price = up_price if total_score > 0 else down_price if total_score < 0 else min(up_price, down_price)
+        if 30 <= entry_price <= 50:
+            zone_signal = 15.0
+        elif 50 < entry_price <= 60:
+            zone_signal = 8.0
+        elif entry_price > 60:
+            zone_signal = -5.0
+        else:
+            zone_signal = 3.0
+        if total_score < 0:
+            zone_signal = -zone_signal
+        total_score += zone_signal
+
+        side = "up" if total_score > 0 else "down" if total_score < 0 else "none"
+        confidence = min(100, int(abs(total_score)))
+        reason_str = " | ".join(reasons[:3]) if reasons else "weak signals"
+        return (side, confidence, reason_str)
+
+    def _determine_phase(self, time_remaining: float) -> str:
+        now = time.time()
+        if self.cycle_start_time > 0 and (now - self.cycle_start_time) < self.OBSERVE_SECONDS:
+            return "observing"
+        if time_remaining < 300:
+            return "exit_only"
+        if self.consecutive_losses >= self.CONSECUTIVE_LOSS_CAUTIOUS or time_remaining < 600:
+            return "cautious"
+        if self.cycle_realized_pnl <= self.MAX_DRAWDOWN:
+            return "exit_only"
+        return "active"
+
+    def _get_active_trade(self):
+        for t in self.trades:
+            if t["status"] == "active":
+                return t
+        return None
+
+    def _has_active_trade(self) -> bool:
+        return self._get_active_trade() is not None
+
+    def on_tick(self, time_remaining: float, up_price: int, down_price: int,
+                portfolio, history: list, cycle_profit: float = 0.0,
+                profit_target: float = 4.0,
+                btc_price: float = 0.0, price_to_beat: float = 0.0,
+                spread_cents: float = 3.0) -> list:
+        now = time.time()
+        actions = []
+
+        if self.cycle_start_time == 0.0:
+            self.cycle_start_time = now
+
+        # Update internal history (20-min buffer)
+        self.price_history.append((now, float(up_price), float(down_price), btc_price))
+        cutoff = now - self.HISTORY_WINDOW
+        self.price_history = [h for h in self.price_history if h[0] >= cutoff]
+
+        self.tick_count += 1
+        self._update_ema(float(up_price))
+        self.rsi_prices.append(float(up_price))
+        if len(self.rsi_prices) > 100:
+            self.rsi_prices = self.rsi_prices[-100:]
+
+        if spread_cents > 0:
+            self.estimated_spread = spread_cents
+
+        self.phase = self._determine_phase(time_remaining)
+
+        side, confidence, reason = self._compute_composite_signal(
+            up_price, down_price, btc_price, price_to_beat, time_remaining
+        )
+        self.confidence = confidence
+
+        # EXITS first
+        active_trade = self._get_active_trade()
+        if active_trade:
+            actions.extend(self._evaluate_exit(active_trade, up_price, down_price,
+                                                time_remaining, now, side, confidence))
+
+        # ENTRIES only if no active trade
+        if not self._has_active_trade() and self.phase in ("active", "cautious"):
+            actions.extend(self._evaluate_entry(side, confidence, reason,
+                                                 up_price, down_price,
+                                                 time_remaining, now, portfolio,
+                                                 cycle_profit, profit_target))
+        return actions
+
+    def _evaluate_exit(self, trade: dict, up_price: int, down_price: int,
+                       time_remaining: float, now: float,
+                       current_signal_side: str, current_confidence: int) -> list:
+        actions = []
+        side = trade["side"]
+        shares = trade["shares"]
+        entry_price = trade["entry_price"]
+        current_price = up_price if side == "up" else down_price
+        unrealized = shares * (current_price - entry_price) / 100.0
+        hold_seconds = now - trade["entry_time"]
+
+        if unrealized > trade.get("peak_pnl", 0.0):
+            trade["peak_pnl"] = unrealized
+
+        # 1. TIME STOP — last 2 min
+        if time_remaining < 120:
+            self._close_trade(trade, current_price, unrealized, "time-stop 2min")
+            actions.append({"action": "market_sell", "side": side, "shares": shares,
+                           "price": current_price, "trade_pnl": unrealized})
+            return actions
+
+        # 2. PHASE EXIT
+        if self.phase == "exit_only":
+            self._close_trade(trade, current_price, unrealized, "phase exit")
+            actions.append({"action": "market_sell", "side": side, "shares": shares,
+                           "price": current_price, "trade_pnl": unrealized})
+            return actions
+
+        # 3. STOP-LOSS + optional position flip
+        if unrealized <= -self.config.stop_loss_per_trade:
+            self._close_trade(trade, current_price, unrealized, f"stop-loss ${unrealized:.2f}")
+            actions.append({"action": "market_sell", "side": side, "shares": shares,
+                           "price": current_price, "trade_pnl": unrealized})
+            # Position flip
+            if (self.config.position_flip_enabled
+                    and time_remaining > 600
+                    and (now - self.last_flip_time) > self.FLIP_COOLDOWN_SECONDS
+                    and self.completed_trade_count < self.config.max_trades_per_cycle):
+                vel_2m = self._compute_velocity(120)
+                opposite = "down" if side == "up" else "up"
+                flip_ok = (side == "up" and vel_2m < -0.15) or (side == "down" and vel_2m > 0.15)
+                if flip_ok:
+                    flip_price = down_price if opposite == "down" else up_price
+                    if flip_price <= self.config.get_max_entry_price():
+                        dollars = min(self.config.get_trade_dollars(), 5.0)
+                        flip_shares = dollars / (flip_price / 100.0)
+                        self._open_trade(opposite, flip_shares, flip_price, now, time_remaining)
+                        self.last_flip_time = now
+                        actions.append({"action": "limit_buy_fill", "side": opposite,
+                                       "shares": flip_shares, "price": flip_price})
+                        print(f"[NCAIO] FLIP {side}->{opposite} @ {flip_price}c vel={vel_2m:+.2f}")
+            return actions
+
+        # 4. QUICK PROFIT
+        if self.config.profit_mode == "quick" and unrealized >= 0.50:
+            self._close_trade(trade, current_price, unrealized, f"quick +${unrealized:.2f}")
+            actions.append({"action": "market_sell", "side": side, "shares": shares,
+                           "price": current_price, "trade_pnl": unrealized})
+            return actions
+
+        # 5. PATIENT PROFIT
+        if self.config.profit_mode == "patient":
+            target = 1.00 if time_remaining > 1800 else 0.80 if time_remaining > 600 else 0.60
+            if target <= unrealized <= 1.50:
+                self._close_trade(trade, current_price, unrealized, f"patient +${unrealized:.2f}")
+                actions.append({"action": "market_sell", "side": side, "shares": shares,
+                               "price": current_price, "trade_pnl": unrealized})
+                return actions
+            peak = trade.get("peak_pnl", 0.0)
+            if peak > 1.50 and unrealized < (peak - 0.15):
+                self._close_trade(trade, current_price, unrealized, f"trail +${unrealized:.2f}")
+                actions.append({"action": "market_sell", "side": side, "shares": shares,
+                               "price": current_price, "trade_pnl": unrealized})
+                return actions
+
+        # 6. TIMEOUT
+        if hold_seconds > self.TIMEOUT_MINUTES * 60 and 0.10 <= unrealized < 0.80:
+            self._close_trade(trade, current_price, unrealized, f"timeout +${unrealized:.2f}")
+            actions.append({"action": "market_sell", "side": side, "shares": shares,
+                           "price": current_price, "trade_pnl": unrealized})
+            return actions
+
+        return actions
+
+    def _close_trade(self, trade: dict, exit_price: int, pnl: float, reason: str):
+        trade["status"] = "closed"
+        trade["exit_price"] = exit_price
+        trade["pnl"] = pnl
+        self.exit_reason = reason
+        self.completed_trade_count += 1
+        self.cycle_realized_pnl += pnl
+        side = trade["side"]
+        self.held_positions[side] = max(0, self.held_positions[side] - trade["shares"])
+        if pnl < 0:
+            self.consecutive_losses += 1
+        else:
+            self.consecutive_losses = 0
+        print(f"[NCAIO] EXIT {side.upper()} #{trade['id']} | {reason} | PnL: ${pnl:+.2f} | Cycle: ${self.cycle_realized_pnl:+.2f}")
+
+    def _open_trade(self, side: str, shares: float, price: int, now: float, time_remaining: float):
+        self.trade_counter += 1
+        trade = {
+            "id": self.trade_counter, "side": side, "shares": shares,
+            "entry_price": price, "entry_time": now, "entry_time_left": time_remaining,
+            "peak_pnl": 0.0, "status": "active",
+        }
+        self.trades.append(trade)
+        self.held_positions[side] += shares
+        self.last_entry_time = now
+        print(f"[NCAIO] ENTRY {side.upper()} #{trade['id']} | {shares:.1f}sh @ {price}c | ${shares * price / 100:.2f}")
+
+    def _evaluate_entry(self, side: str, confidence: int, reason: str,
+                        up_price: int, down_price: int,
+                        time_remaining: float, now: float, portfolio,
+                        cycle_profit: float, profit_target: float) -> list:
+        actions = []
+        if side == "none":
+            return actions
+        if self.completed_trade_count >= self.config.max_trades_per_cycle:
+            return actions
+        if cycle_profit >= profit_target:
+            return actions
+        if self.cycle_realized_pnl <= self.MAX_DRAWDOWN:
+            return actions
+        if time_remaining < 300:
+            return actions
+        if (now - self.last_entry_time) < self.ANTI_WHIPSAW_SECONDS:
+            return actions
+
+        min_conf = self.config.get_min_confidence()
+        if self.phase == "cautious":
+            min_conf = max(min_conf, 75)
+        if confidence < min_conf:
+            return actions
+
+        entry_price = up_price if side == "up" else down_price
+        if entry_price > self.config.get_max_entry_price():
+            return actions
+
+        # Spread check
+        spread = self.estimated_spread
+        effective_cost = entry_price + spread / 2
+        min_target_cents = 5.0 if self.config.profit_mode == "quick" else 10.0
+        if (100 - effective_cost) < (min_target_cents + spread):
+            return actions
+
+        # Pullback detection
+        vel_30s = self._compute_velocity(30)
+        vel_10s = self._compute_velocity(10)
+        if abs(vel_30s) > 0.3:
+            if side == "up" and vel_30s > 0.3 and vel_10s > 0:
+                return actions
+            if side == "down" and vel_30s < -0.3 and vel_10s < 0:
+                return actions
+
+        # Sizing
+        dollars = self.config.get_trade_dollars()
+        if time_remaining < 900:
+            dollars = min(dollars, 5.0)
+        shares = dollars / (entry_price / 100.0)
+        cost = shares * (entry_price / 100.0)
+        if portfolio.balance < cost:
+            shares = portfolio.balance / (entry_price / 100.0)
+            cost = shares * (entry_price / 100.0)
+        if shares <= 0 or cost < 0.10:
+            return actions
+
+        self._open_trade(side, shares, entry_price, now, time_remaining)
+        actions.append({"action": "limit_buy_fill", "side": side, "shares": shares, "price": entry_price})
+        return actions

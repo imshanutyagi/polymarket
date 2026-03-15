@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import List, Dict
-from strategies import HighFrequencyScalper, TrendScaler, ClaudeStrategy
+from strategies import HighFrequencyScalper, TrendScaler, ClaudeStrategy, NewClaudeAllInOneStrategy
 
 # --- Live Trading Setup ---
 from dotenv import load_dotenv
@@ -73,6 +73,7 @@ scalper_4 = HighFrequencyScalper()
 scalper_5 = HighFrequencyScalper()
 scalper_6 = TrendScaler()
 claude_strategy = ClaudeStrategy()
+ncaio_strategy = NewClaudeAllInOneStrategy()
 
 app = FastAPI()
 
@@ -478,6 +479,7 @@ class MarketState:
         self.live_slug = ""
         self.prices_loaded = False  # True only after first real CLOB price update
         self.transitioning = False  # True while searching for next market (prevents simulator 1c/99c)
+        self.btc_price = 0.0  # Real-time BTC USD price from Binance
         
     def reset_cycle(self, price: float):
         self.price_to_beat = price
@@ -631,12 +633,13 @@ active_strategy_f = False
 active_strategy_7 = False
 active_strategy_cpt = False  # Strategy C+ Trail
 active_strategy_claude = False  # Claude AI Confluence Strategy
+active_strategy_ncaio = False   # New Claude All-in-One Strategy
 cpt_entry_time = 0.0  # Timestamp when C+ Trail position was opened
 global_profit_target = 4.0
 
 # Per-strategy performance stats (persist across cycles, reset manually)
 _stat_keys = ["strategy_a","strategy_b","strategy_c","strategy_c_trailing",
-               "strategy_d","strategy_e","strategy_f","strategy_7","strategy_cpt","strategy_claude"]
+               "strategy_d","strategy_e","strategy_f","strategy_7","strategy_cpt","strategy_claude","strategy_ncaio"]
 strategy_stats = {k: {"trades":0,"wins":0,"total_profit":0.0,"best":0.0,"worst":0.0} for k in _stat_keys}
 
 # AI Agent globals
@@ -695,6 +698,13 @@ def save_settings():
         "active_strategy_7": active_strategy_7,
         "active_strategy_cpt": active_strategy_cpt,
         "active_strategy_claude": active_strategy_claude,
+        "active_strategy_ncaio": active_strategy_ncaio,
+        "ncaio_trade_size": ncaio_strategy.config.trade_size_preset,
+        "ncaio_risk_level": ncaio_strategy.config.risk_level,
+        "ncaio_position_flip": ncaio_strategy.config.position_flip_enabled,
+        "ncaio_profit_mode": ncaio_strategy.config.profit_mode,
+        "ncaio_max_trades": ncaio_strategy.config.max_trades_per_cycle,
+        "ncaio_stop_loss": ncaio_strategy.config.stop_loss_per_trade,
         "global_profit_target": global_profit_target if global_profit_target != float('inf') else -1,
         "ai_agent_enabled": ai_agent_enabled,
         "ai_model": ai_model,
@@ -715,7 +725,7 @@ def load_settings():
     """Load persisted settings on startup."""
     global active_strategy_a, active_strategy_b, active_strategy_c, active_strategy_c_trailing
     global active_strategy_d, active_strategy_e, active_strategy_f, active_strategy_7
-    global active_strategy_cpt, active_strategy_claude, global_profit_target
+    global active_strategy_cpt, active_strategy_claude, active_strategy_ncaio, global_profit_target
     global ai_agent_enabled, ai_model, ai_api_key, ai_confidence_threshold, ai_max_entry, ai_max_spread, ai_clob_safe_mode, ai_prompt_mode
     try:
         if not os.path.exists(SETTINGS_FILE):
@@ -732,6 +742,13 @@ def load_settings():
         active_strategy_7         = data.get("active_strategy_7", False)
         active_strategy_cpt       = data.get("active_strategy_cpt", False)
         active_strategy_claude    = data.get("active_strategy_claude", False)
+        active_strategy_ncaio     = data.get("active_strategy_ncaio", False)
+        ncaio_strategy.config.trade_size_preset = data.get("ncaio_trade_size", "medium")
+        ncaio_strategy.config.risk_level = data.get("ncaio_risk_level", "balanced")
+        ncaio_strategy.config.position_flip_enabled = data.get("ncaio_position_flip", True)
+        ncaio_strategy.config.profit_mode = data.get("ncaio_profit_mode", "quick")
+        ncaio_strategy.config.max_trades_per_cycle = data.get("ncaio_max_trades", 8)
+        ncaio_strategy.config.stop_loss_per_trade = data.get("ncaio_stop_loss", 2.0)
         pt = data.get("global_profit_target", 4.0)
         global_profit_target      = float('inf') if pt == -1 else float(pt)
         ai_agent_enabled          = data.get("ai_agent_enabled", False)
@@ -1400,6 +1417,21 @@ async def broadcast_state():
                 "claude_confidence": claude_strategy.confidence,
                 "claude_phase": claude_strategy.phase,
                 "claude_exit_reason": claude_strategy.exit_reason,
+                "strategy_ncaio": active_strategy_ncaio,
+                "ncaio_confidence": ncaio_strategy.confidence,
+                "ncaio_phase": ncaio_strategy.phase,
+                "ncaio_exit_reason": ncaio_strategy.exit_reason,
+                "ncaio_active_trades": len([t for t in ncaio_strategy.trades if t["status"] == "active"]),
+                "ncaio_completed_trades": ncaio_strategy.completed_trade_count,
+                "ncaio_realized_pnl": round(ncaio_strategy.cycle_realized_pnl, 2),
+                "ncaio_config": {
+                    "trade_size": ncaio_strategy.config.trade_size_preset,
+                    "risk_level": ncaio_strategy.config.risk_level,
+                    "position_flip": ncaio_strategy.config.position_flip_enabled,
+                    "profit_mode": ncaio_strategy.config.profit_mode,
+                    "max_trades": ncaio_strategy.config.max_trades_per_cycle,
+                    "stop_loss": ncaio_strategy.config.stop_loss_per_trade,
+                },
                 "profit_target": global_profit_target if global_profit_target != float('inf') else -1,
                 "strikes": strategy_a_strikes,
                 "b_done": strategy_b_trade_done,
@@ -1462,7 +1494,7 @@ async def sync_live_balance():
             print(f"[LIVE] Balance sync error: {e}")
 
 async def market_loop():
-    global active_strategy_a, active_strategy_b, active_strategy_claude
+    global active_strategy_a, active_strategy_b, active_strategy_claude, active_strategy_ncaio
     global strategy_a_strikes, strategy_b_trade_done, strategy_a_done
     global cycle_warmup_until, ai_agent_state, clob_last_update_time, position_entry_time, position_entry_time_left_min
 
@@ -1486,6 +1518,7 @@ async def market_loop():
                 scalper_5.reset_state()
                 scalper_6.reset_state()
                 claude_strategy.reset_state(full_reset=True)
+                ncaio_strategy.reset_state(full_reset=True)
                 market.prices_loaded = False
                 clob_last_update_time = 0.0
                 position_entry_time = 0.0
@@ -1508,9 +1541,10 @@ async def market_loop():
             
             time_left = market.get_time_left_seconds()
             
+            # NCAIO strategy handles its own exits internally — skip shared exit logic
             # Check for Early Profit Exit
             sunk = portfolio.total_spent
-            if sunk > 0:
+            if sunk > 0 and not active_strategy_ncaio:
                 up_val = portfolio.positions['up'] * (market.up_price / 100.0)
                 down_val = portfolio.positions['down'] * (market.down_price / 100.0)
                 live_profit = (up_val + down_val) - sunk
@@ -2108,6 +2142,73 @@ async def market_loop():
                         else:
                             claude_strategy.held_positions[act["side"]] -= act["shares"]
 
+            # ═══ NEW CLAUDE ALL-IN-ONE STRATEGY ═══════════════════════════
+            if active_strategy_ncaio and time_left > 0:
+                ncaio_actions = ncaio_strategy.on_tick(
+                    time_remaining=time_left,
+                    up_price=market.up_price,
+                    down_price=market.down_price,
+                    portfolio=portfolio,
+                    history=market.history,
+                    cycle_profit=portfolio.cycle_profit,
+                    profit_target=global_profit_target,
+                    btc_price=market.btc_price,
+                    price_to_beat=market.price_to_beat,
+                    spread_cents=market_spread_cents
+                )
+                for act in ncaio_actions:
+                    if act["action"] in ["market_sell", "limit_sell_fill"]:
+                        revenue = act["shares"] * (act["price"] / 100.0)
+                        portfolio.balance += revenue
+                        avg_entry = 0.0
+                        if portfolio.positions[act["side"]] > 0:
+                            avg_entry = portfolio.spent[act["side"]] / portfolio.positions[act["side"]]
+                        shares_to_deduct = min(act["shares"], portfolio.positions[act["side"]])
+                        if shares_to_deduct < 0:
+                            shares_to_deduct = 0
+                        portfolio.positions[act["side"]] -= shares_to_deduct
+                        portfolio.spent[act["side"]] -= avg_entry * shares_to_deduct
+                        if portfolio.spent[act["side"]] < 0 or portfolio.positions[act["side"]] <= 0:
+                            portfolio.spent[act["side"]] = 0.0
+                            portfolio.positions[act["side"]] = 0.0
+                        portfolio.total_spent = sum(portfolio.spent.values())
+                        cost_basis = avg_entry * act["shares"]
+                        realized_profit = revenue - cost_basis
+                        portfolio.cycle_profit += realized_profit
+                        trade_pnl = act.get("trade_pnl", realized_profit)
+                        record_stat("strategy_ncaio", trade_pnl)
+                        portfolio.history.append({
+                            'time': datetime.now().strftime("%H:%M:%S"),
+                            'winning_side': f"NCAIO_{act['side'].upper()}",
+                            'up_shares': round(act["shares"] if act["side"] == 'up' else 0.0, 2),
+                            'down_shares': round(act["shares"] if act["side"] == 'down' else 0.0, 2),
+                            'spent': round(cost_basis, 2),
+                            'payout': round(revenue, 2),
+                            'profit': round(realized_profit, 2)
+                        })
+                        if len(portfolio.history) > 10:
+                            portfolio.history = portfolio.history[-10:]
+                        if live_mode_enabled:
+                            asyncio.create_task(execute_live_sell(act["side"], act["shares"], act["price"]))
+
+                    elif act["action"] == "limit_buy_fill":
+                        cost = act["shares"] * (act["price"] / 100.0)
+                        if portfolio.balance >= cost:
+                            portfolio.balance -= cost
+                            portfolio.positions[act["side"]] += act["shares"]
+                            portfolio.total_spent += cost
+                            portfolio.spent[act["side"]] += cost
+                            position_entry_time = time.time()
+                            position_entry_time_left_min = time_left / 60.0
+                            if live_mode_enabled:
+                                asyncio.create_task(execute_live_buy(act["side"], act["shares"], act["price"]))
+                        else:
+                            # Insufficient balance — revert internal tracking
+                            ncaio_strategy.held_positions[act["side"]] -= act["shares"]
+                            active_trade = ncaio_strategy._get_active_trade()
+                            if active_trade and active_trade["side"] == act["side"]:
+                                active_trade["status"] = "closed"
+
             await broadcast_state()
             await asyncio.sleep(1)
         except Exception as e:
@@ -2364,6 +2465,15 @@ async def _poll_live_prices():
                 except Exception:
                     pass
 
+            # Fetch real-time BTC price from Binance (for NCAIO strategy)
+            try:
+                async with httpx.AsyncClient(timeout=3.0) as hclient:
+                    btc_resp = await hclient.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT")
+                if btc_resp.status_code == 200:
+                    market.btc_price = float(btc_resp.json()["price"])
+            except Exception:
+                pass  # Keep last known BTC price
+
             # CLOB had token IDs — don't fall back to Gamma (which returns stale mid-prices)
             return
 
@@ -2556,7 +2666,33 @@ async def websocket_endpoint(websocket: WebSocket):
                     live_portfolio.cycle_profit = 0.0
                     market.peak_profit = 0.0
                     claude_strategy.reset_state(full_reset=True)
-                    active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = active_strategy_cpt = False
+                    active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = active_strategy_cpt = active_strategy_ncaio = False
+                save_settings()
+            elif action == "TOGGLE_STRATEGY_NCAIO":
+                active_strategy_ncaio = not active_strategy_ncaio
+                if active_strategy_ncaio:
+                    paper_portfolio.cycle_profit = 0.0
+                    live_portfolio.cycle_profit = 0.0
+                    market.peak_profit = 0.0
+                    ncaio_strategy.reset_state(full_reset=True)
+                    active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = False
+                    active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = False
+                    active_strategy_cpt = active_strategy_claude = False
+                save_settings()
+            elif action == "SET_NCAIO_CONFIG":
+                cfg = ncaio_strategy.config
+                if "trade_size" in cmd:
+                    cfg.trade_size_preset = cmd["trade_size"]
+                if "risk_level" in cmd:
+                    cfg.risk_level = cmd["risk_level"]
+                if "position_flip" in cmd:
+                    cfg.position_flip_enabled = bool(cmd["position_flip"])
+                if "profit_mode" in cmd:
+                    cfg.profit_mode = cmd["profit_mode"]
+                if "max_trades" in cmd:
+                    cfg.max_trades_per_cycle = max(1, min(20, int(cmd["max_trades"])))
+                if "stop_loss" in cmd:
+                    cfg.stop_loss_per_trade = max(0.5, min(5.0, float(cmd["stop_loss"])))
                 save_settings()
             elif action == "TOGGLE_AI_AGENT":
                 ai_agent_enabled = not ai_agent_enabled
