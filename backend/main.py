@@ -2504,33 +2504,90 @@ async def _poll_live_prices():
             except Exception as e:
                 print(f"[CLOB] Failed to fetch token IDs: {e}")
 
-        # Use CLOB best ask for accurate prices — fetch both concurrently for speed
+        # ── PRIMARY: Use /price endpoint (returns computed price even with thin orderbook) ──
         if up_token and down_token:
+            up_raw = None
+            dn_raw = None
+            price_source = "none"
+
             async with httpx.AsyncClient(timeout=5.0) as hclient:
-                up_resp, dn_resp = await asyncio.gather(
-                    hclient.get(f"https://clob.polymarket.com/book?token_id={up_token}"),
-                    hclient.get(f"https://clob.polymarket.com/book?token_id={down_token}"),
-                )
-            up_data = up_resp.json() if up_resp.status_code == 200 else {}
-            dn_data = dn_resp.json() if dn_resp.status_code == 200 else {}
-            up_asks = up_data.get("asks", [])
-            dn_asks = dn_data.get("asks", [])
-            has_up = bool(up_asks)
-            has_dn = bool(dn_asks)
+                # Step 1: Try /price endpoint for both tokens (most reliable at cycle start)
+                try:
+                    up_price_resp, dn_price_resp = await asyncio.gather(
+                        hclient.get(f"https://clob.polymarket.com/price?token_id={up_token}&side=BUY"),
+                        hclient.get(f"https://clob.polymarket.com/price?token_id={down_token}&side=BUY"),
+                    )
+                    if up_price_resp.status_code == 200:
+                        up_price_data = up_price_resp.json()
+                        p = float(up_price_data.get("price", 0))
+                        if 0.01 < p < 0.99:
+                            up_raw = p
+                    if dn_price_resp.status_code == 200:
+                        dn_price_data = dn_price_resp.json()
+                        p = float(dn_price_data.get("price", 0))
+                        if 0.01 < p < 0.99:
+                            dn_raw = p
+                    if up_raw and dn_raw:
+                        price_source = "price"
+                except Exception as e:
+                    print(f"[CLOB] /price endpoint error: {e}")
 
-            if has_up or has_dn:
-                # Got CLOB data on at least one side
-                up_raw = min(float(a["price"]) for a in up_asks) if has_up else None
-                dn_raw = min(float(a["price"]) for a in dn_asks) if has_dn else None
+                # Step 2: If /price didn't give both sides, try /midpoint
+                if not up_raw or not dn_raw:
+                    try:
+                        mid_tasks = []
+                        if not up_raw:
+                            mid_tasks.append(("up", hclient.get(f"https://clob.polymarket.com/midpoint?token_id={up_token}")))
+                        if not dn_raw:
+                            mid_tasks.append(("dn", hclient.get(f"https://clob.polymarket.com/midpoint?token_id={down_token}")))
+                        mid_results = await asyncio.gather(*[t[1] for t in mid_tasks], return_exceptions=True)
+                        for (side, _), result in zip(mid_tasks, mid_results):
+                            if isinstance(result, Exception):
+                                continue
+                            if result.status_code == 200:
+                                mid_data = result.json()
+                                mp = float(mid_data.get("mid", 0))
+                                if 0.01 < mp < 0.99:
+                                    if side == "up":
+                                        up_raw = mp
+                                    else:
+                                        dn_raw = mp
+                                    price_source = "midpoint" if price_source == "none" else "price+midpoint"
+                    except Exception as e:
+                        print(f"[CLOB] /midpoint endpoint error: {e}")
 
-                # If one side missing, derive from the other (binary market: UP + DOWN ≈ 1.00)
-                if up_raw and not dn_raw:
-                    dn_raw = max(0.01, 1.0 - up_raw)
-                    print(f"[CLOB] DOWN side empty — derived from UP: {dn_raw:.2f}")
-                elif dn_raw and not up_raw:
-                    up_raw = max(0.01, 1.0 - dn_raw)
-                    print(f"[CLOB] UP side empty — derived from DOWN: {up_raw:.2f}")
+                # Step 3: Fall back to /book orderbook (also gets liquidity/spread data)
+                up_data = {}
+                dn_data = {}
+                try:
+                    up_resp, dn_resp = await asyncio.gather(
+                        hclient.get(f"https://clob.polymarket.com/book?token_id={up_token}"),
+                        hclient.get(f"https://clob.polymarket.com/book?token_id={down_token}"),
+                    )
+                    up_data = up_resp.json() if up_resp.status_code == 200 else {}
+                    dn_data = dn_resp.json() if dn_resp.status_code == 200 else {}
+                    up_asks = up_data.get("asks", [])
+                    dn_asks = dn_data.get("asks", [])
 
+                    # If /price and /midpoint both failed, use orderbook best ask
+                    if not up_raw and up_asks:
+                        up_raw = min(float(a["price"]) for a in up_asks)
+                        price_source = "book" if price_source == "none" else price_source + "+book"
+                    if not dn_raw and dn_asks:
+                        dn_raw = min(float(a["price"]) for a in dn_asks)
+                        price_source = "book" if price_source == "none" else price_source + "+book"
+                except Exception as e:
+                    print(f"[CLOB] /book endpoint error: {e}")
+
+            # Derive missing side from the other (binary market: UP + DOWN ≈ 1.00)
+            if up_raw and not dn_raw:
+                dn_raw = max(0.01, 1.0 - up_raw)
+                price_source += "(dn-derived)"
+            elif dn_raw and not up_raw:
+                up_raw = max(0.01, 1.0 - dn_raw)
+                price_source += "(up-derived)"
+
+            if up_raw and dn_raw:
                 up_val = max(1, min(99, round(up_raw * 100)))
                 dn_val = max(1, min(99, round(dn_raw * 100)))
                 is_settled = (up_val <= 1 or dn_val <= 1 or up_val >= 99 or dn_val >= 99)
@@ -2545,27 +2602,27 @@ async def _poll_live_prices():
                     market.history = [h for h in market.history if now - h[0] <= 300]
                     # --- Extract liquidity/spread from order book ---
                     try:
+                        up_asks = up_data.get("asks", [])
                         up_bids = up_data.get("bids", [])
-                        if has_up:
-                            best_ask_price = up_raw
+                        if up_asks:
+                            best_ask_price = min(float(a["price"]) for a in up_asks)
                             ask_liq = sum(float(a["size"]) for a in up_asks if abs(float(a["price"]) - best_ask_price) < 0.01)
                             market_ask_liquidity = round(ask_liq * best_ask_price, 2)
-                        if has_up and up_bids:
+                        if up_asks and up_bids:
                             best_bid_price = max(float(b["price"]) for b in up_bids)
                             bid_liq = sum(float(b["size"]) for b in up_bids if abs(float(b["price"]) - best_bid_price) < 0.01)
                             market_bid_liquidity = round(bid_liq * best_bid_price, 2)
-                            market_spread_cents = round((up_raw - best_bid_price) * 100, 1)
+                            market_spread_cents = round((best_ask_price - best_bid_price) * 100, 1)
                         else:
                             market_bid_liquidity = 0.0
                             market_spread_cents = 0.0
                     except Exception:
                         pass
-                    print(f"[CLOB] UP={market.up_price}¢ DOWN={market.down_price}¢ | spread={market_spread_cents}¢ ask_liq=${market_ask_liquidity} bid_liq=${market_bid_liquidity}")
+                    print(f"[CLOB] UP={market.up_price}¢ DOWN={market.down_price}¢ via {price_source} | spread={market_spread_cents}¢ ask_liq=${market_ask_liquidity} bid_liq=${market_bid_liquidity}")
             else:
-                # CLOB orderbook fully empty — fall back to Gamma API
-                # After 30 seconds of empty CLOB, accept Gamma prices for trading too
+                # ALL CLOB endpoints returned nothing — fall back to Gamma API
                 seconds_without_clob = time.time() - (clob_last_update_time if clob_last_update_time > 0 else market.cycle_end_time - market.cycle_duration)
-                print(f"[CLOB] Orderbook empty for {slug} ({seconds_without_clob:.0f}s without data)...")
+                print(f"[CLOB] All endpoints empty for {slug} ({seconds_without_clob:.0f}s without data)...")
                 try:
                     async with httpx.AsyncClient(timeout=5.0) as hclient:
                         gamma_resp = await hclient.get(f"https://gamma-api.polymarket.com/events?slug={slug}")
@@ -2584,7 +2641,6 @@ async def _poll_live_prices():
                                     market.up_price = g_up
                                     market.down_price = g_dn
                                     market.current_price = market.up_price
-                                    # After 30s without CLOB, accept Gamma for trading
                                     if seconds_without_clob > 30:
                                         market.prices_loaded = True
                                         clob_last_update_time = time.time()
