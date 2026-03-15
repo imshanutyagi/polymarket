@@ -2166,14 +2166,14 @@ async def auto_discover_market():
             cur_h24 = current_et.hour
             cur_ampm = "pm" if cur_h24 >= 12 else "am"
             cur_h12 = cur_h24 % 12 or 12
-            current_slug = f"bitcoin-up-or-down-{current_et.strftime('%B').lower()}-{current_et.day}-{cur_h12}{cur_ampm}-et"
+            current_slug = f"bitcoin-up-or-down-{current_et.strftime('%B').lower()}-{current_et.day}-{current_et.year}-{cur_h12}{cur_ampm}-et"
 
             # Also try next hour (for early discovery near hour boundaries)
             next_et = current_et + timedelta(hours=1)
             nxt_h24 = next_et.hour
             nxt_ampm = "pm" if nxt_h24 >= 12 else "am"
             nxt_h12 = nxt_h24 % 12 or 12
-            next_slug = f"bitcoin-up-or-down-{next_et.strftime('%B').lower()}-{next_et.day}-{nxt_h12}{nxt_ampm}-et"
+            next_slug = f"bitcoin-up-or-down-{next_et.strftime('%B').lower()}-{next_et.day}-{next_et.year}-{nxt_h12}{nxt_ampm}-et"
 
             slugs_to_try = [current_slug]
             if next_slug != current_slug:
