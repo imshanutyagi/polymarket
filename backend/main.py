@@ -2239,6 +2239,7 @@ async def auto_discover_market():
                                         market.up_price = up_clamped
                                         market.down_price = dn_clamped
                                         market.prices_loaded = True
+                                        clob_last_update_time = time.time()  # Allow AI agent to trade immediately
                                     market.cycle_duration = time_remaining
                                     market.cycle_end_time = time.time() + time_remaining
                                     market.history = []  # Clear old chart data
@@ -2319,6 +2320,34 @@ async def _poll_live_prices():
                     except Exception:
                         pass
                     print(f"[CLOB] UP={market.up_price}¢ DOWN={market.down_price}¢ | spread={market_spread_cents}¢ ask_liq=${market_ask_liquidity} bid_liq=${market_bid_liquidity}")
+            else:
+                # CLOB orderbook empty (new market) — fall back to Gamma API prices
+                print(f"[CLOB] Orderbook empty for {slug}, falling back to Gamma API...")
+                try:
+                    async with httpx.AsyncClient(timeout=5.0) as hclient:
+                        gamma_resp = await hclient.get(f"https://gamma-api.polymarket.com/events?slug={slug}")
+                    gamma_data = gamma_resp.json() if gamma_resp.status_code == 200 else []
+                    if gamma_data and len(gamma_data) > 0:
+                        for gm in gamma_data[0].get("markets", []):
+                            if not gm.get("closed") and gm.get("active"):
+                                g_prices = json.loads(gm.get("outcomePrices", "[]"))
+                                g_outcomes = json.loads(gm.get("outcomes", "[]"))
+                                g_yes = next((i for i, o in enumerate(g_outcomes) if o.lower() in ("yes", "up", "above")), 0)
+                                g_no = next((i for i, o in enumerate(g_outcomes) if o.lower() in ("no", "down", "below")), 1)
+                                g_up = max(1, min(99, round(float(g_prices[g_yes]) * 100)))
+                                g_dn = max(1, min(99, round(float(g_prices[g_no]) * 100)))
+                                g_stale = (g_up <= 5 or g_dn <= 5 or g_up >= 95 or g_dn >= 95)
+                                if not g_stale:
+                                    market.up_price = g_up
+                                    market.down_price = g_dn
+                                    market.prices_loaded = True
+                                    market.current_price = market.up_price
+                                    clob_last_update_time = time.time()
+                                    market.history.append((clob_last_update_time, market.up_price))
+                                    print(f"[GAMMA-FALLBACK] UP={g_up}¢ DOWN={g_dn}¢")
+                                break
+                except Exception as e:
+                    print(f"[GAMMA-FALLBACK] Error: {e}")
 
             # Fetch 24h volume from Gamma once every 5 minutes
             if time.time() - market_volume_updated > 300:
@@ -2445,8 +2474,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 if not (_up <= 5 or _dn <= 5 or _up >= 95 or _dn >= 95):
                     market.up_price = _up
                     market.down_price = _dn
-                    if not market.prices_loaded:
-                        market.prices_loaded = True
+                    market.prices_loaded = True
+                    if clob_last_update_time == 0.0:
                         clob_last_update_time = time.time()
                 title = cmd.get("title", "Live Market")
                 
