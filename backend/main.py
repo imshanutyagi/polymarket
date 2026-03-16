@@ -2535,8 +2535,7 @@ async def auto_discover_market():
                                     if not is_settled:
                                         market.up_price = up_clamped
                                         market.down_price = dn_clamped
-                                        # DO NOT set prices_loaded here — Gamma can return delayed/default prices
-                                        # Let _poll_live_prices() set it once CLOB has real orderbook data.
+                                        market.prices_loaded = True  # Use Gamma prices immediately (CLOB overrides later)
                                     market.cycle_duration = time_remaining
                                     market.cycle_end_time = time.time() + time_remaining
                                     market.history = []  # Clear old chart data
@@ -2561,38 +2560,9 @@ async def auto_discover_market():
             print(f"[AUTO] Discovery error: {e}")
             await asyncio.sleep(15)
 
-def _calc_btc_binary_prob(btc_price: float, target: float, seconds_left: float) -> tuple:
-    """Calculate BTC binary option probability from price, target, and time remaining.
-    Uses Black-Scholes-style log-normal model calibrated to match Polymarket pricing."""
-    import math
-    if target <= 0 or btc_price <= 0 or seconds_left <= 0:
-        return None, None
-    ANNUAL_VOL = 0.40  # 40% annualized BTC volatility (calibrated to Polymarket)
-    hours_left = seconds_left / 3600.0
-    time_years = hours_left / 8760.0
-    sigma = ANNUAL_VOL * math.sqrt(time_years)
-    if sigma < 1e-10:
-        up = 99 if btc_price > target else 1
-        return up, 100 - up
-    d = (math.log(btc_price / target) + 0.5 * sigma * sigma) / sigma
-    # Normal CDF approximation (Abramowitz & Stegun)
-    def _norm_cdf(x):
-        if x > 6: return 1.0
-        if x < -6: return 0.0
-        a1, a2, a3, a4, a5 = 0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429
-        p = 0.3275911
-        sign = 1 if x >= 0 else -1
-        t = 1.0 / (1.0 + p * abs(x))
-        y = 1.0 - (((((a5*t + a4)*t) + a3)*t + a2)*t + a1) * t * math.exp(-x*x/2)
-        return 0.5 * (1.0 + sign * y)
-    prob_up = _norm_cdf(d)
-    up_cents = max(1, min(99, round(prob_up * 100)))
-    dn_cents = max(1, min(99, 100 - up_cents))
-    return up_cents, dn_cents
-
-
 async def _poll_live_prices():
-    """Poll CLOB order book for live price updates. ALL pricing from Polymarket CLOB only."""
+    """Poll CLOB order book for live price updates — simple approach matching commit 7f6f2db.
+    Gamma prices are set in auto_discover (immediate). CLOB /book overrides when available."""
     global clob_last_update_time, market_ask_liquidity, market_bid_liquidity, market_spread_cents, market_volume_24h, market_volume_updated
     try:
         slug = market.live_slug
@@ -2627,19 +2597,12 @@ async def _poll_live_prices():
             except Exception as e:
                 print(f"[CLOB] Failed to fetch token IDs: {e}")
 
-        # ── PRICING: Cross-book pricing (matches Polymarket UI exactly) ──
-        # Polymarket "Buy UP" = min(UP_best_ask, 1 - DOWN_best_bid)
-        # Polymarket "Buy DOWN" = min(DOWN_best_ask, 1 - UP_best_bid)
-        # This is because buying UP at X¢ is the same as selling DOWN at (1-X)¢
+        # ── PRICING: Simple CLOB best-ask (same as working commit 7f6f2db) ──
+        # Gamma prices already set by auto_discover. CLOB overrides when both sides have data.
         if up_token and down_token:
-            up_raw = None
-            dn_raw = None
-            price_source = "none"
             up_data = {}
             dn_data = {}
-
             async with httpx.AsyncClient(timeout=5.0) as hclient:
-                # Step 1: Fetch BOTH orderbooks (we need asks AND bids from both)
                 try:
                     up_resp, dn_resp = await asyncio.gather(
                         hclient.get(f"https://clob.polymarket.com/book?token_id={up_token}"),
@@ -2647,151 +2610,18 @@ async def _poll_live_prices():
                     )
                     up_data = up_resp.json() if up_resp.status_code == 200 else {}
                     dn_data = dn_resp.json() if dn_resp.status_code == 200 else {}
-
-                    up_asks = up_data.get("asks", [])
-                    up_bids = up_data.get("bids", [])
-                    dn_asks = dn_data.get("asks", [])
-                    dn_bids = dn_data.get("bids", [])
-
-                    # Direct prices (best ask on each token's orderbook)
-                    up_direct = min(float(a["price"]) for a in up_asks) if up_asks else None
-                    dn_direct = min(float(a["price"]) for a in dn_asks) if dn_asks else None
-
-                    # Cross-book prices (derived from the OTHER token's best bid)
-                    # Buying UP = selling DOWN, so UP price = 1 - DOWN_best_bid
-                    up_cross = (1.0 - max(float(b["price"]) for b in dn_bids)) if dn_bids else None
-                    # Buying DOWN = selling UP, so DOWN price = 1 - UP_best_bid
-                    dn_cross = (1.0 - max(float(b["price"]) for b in up_bids)) if up_bids else None
-
-                    # Take the BEST (lowest) price from direct or cross-book (same as Polymarket UI)
-                    candidates_up = [p for p in [up_direct, up_cross] if p is not None and 0.01 < p < 0.99]
-                    candidates_dn = [p for p in [dn_direct, dn_cross] if p is not None and 0.01 < p < 0.99]
-
-                    if candidates_up:
-                        up_raw = min(candidates_up)
-                    if candidates_dn:
-                        dn_raw = min(candidates_dn)
-
-                    if up_raw and dn_raw:
-                        price_source = "book-cross"
-                    elif up_raw or dn_raw:
-                        price_source = "book-cross(partial)"
-
-                    # Debug logging
-                    print(f"[CLOB-DEBUG] UP: direct={up_direct} cross={up_cross} → {up_raw} | DN: direct={dn_direct} cross={dn_cross} → {dn_raw}")
-
                 except Exception as e:
-                    print(f"[CLOB] /book endpoint error: {e}")
+                    print(f"[CLOB] /book error: {e}")
 
-                # Step 2: If /book didn't give both sides, try /price
-                if not up_raw or not dn_raw:
-                    try:
-                        price_tasks = []
-                        if not up_raw:
-                            price_tasks.append(("up", hclient.get(f"https://clob.polymarket.com/price?token_id={up_token}&side=BUY")))
-                        if not dn_raw:
-                            price_tasks.append(("dn", hclient.get(f"https://clob.polymarket.com/price?token_id={down_token}&side=BUY")))
-                        price_results = await asyncio.gather(*[t[1] for t in price_tasks], return_exceptions=True)
-                        for (side, _), result in zip(price_tasks, price_results):
-                            if isinstance(result, Exception):
-                                continue
-                            if result.status_code == 200:
-                                pd = result.json()
-                                p = float(pd.get("price", 0))
-                                if 0.01 < p < 0.99:
-                                    if side == "up":
-                                        up_raw = p
-                                    else:
-                                        dn_raw = p
-                                    price_source = "price" if price_source == "none" else price_source + "+price"
-                    except Exception as e:
-                        print(f"[CLOB] /price endpoint error: {e}")
+            up_asks = up_data.get("asks", [])
+            dn_asks = dn_data.get("asks", [])
 
-                # Step 3: If still missing a side, try /midpoint
-                if not up_raw or not dn_raw:
-                    try:
-                        mid_tasks = []
-                        if not up_raw:
-                            mid_tasks.append(("up", hclient.get(f"https://clob.polymarket.com/midpoint?token_id={up_token}")))
-                        if not dn_raw:
-                            mid_tasks.append(("dn", hclient.get(f"https://clob.polymarket.com/midpoint?token_id={down_token}")))
-                        mid_results = await asyncio.gather(*[t[1] for t in mid_tasks], return_exceptions=True)
-                        for (side, _), result in zip(mid_tasks, mid_results):
-                            if isinstance(result, Exception):
-                                continue
-                            if result.status_code == 200:
-                                md = result.json()
-                                mp = float(md.get("mid", 0))
-                                if 0.01 < mp < 0.99:
-                                    if side == "up":
-                                        up_raw = mp
-                                    else:
-                                        dn_raw = mp
-                                    price_source = "midpoint" if price_source == "none" else price_source + "+midpoint"
-                    except Exception as e:
-                        print(f"[CLOB] /midpoint endpoint error: {e}")
-
-            # Last resort: derive missing side from the other
-            if up_raw and not dn_raw:
-                dn_raw = max(0.01, 1.0 - up_raw)
-                price_source += "(dn-derived)"
-            elif dn_raw and not up_raw:
-                up_raw = max(0.01, 1.0 - dn_raw)
-                price_source += "(up-derived)"
-
-            if up_raw and dn_raw:
+            if up_asks and dn_asks:
+                up_raw = min(float(a["price"]) for a in up_asks)
+                dn_raw = min(float(a["price"]) for a in dn_asks)
                 up_val = max(1, min(99, round(up_raw * 100)))
                 dn_val = max(1, min(99, round(dn_raw * 100)))
                 is_settled = (up_val <= 1 or dn_val <= 1 or up_val >= 99 or dn_val >= 99)
-
-                # ── STALE PRICE DETECTION ──
-                # At cycle start, CLOB and Gamma both return stale ~50/50 prices.
-                # The Polymarket UI uses an internal pricing engine we can't access.
-                # Fix: Calculate probability from BTC price vs target using Black-Scholes model.
-                if not is_settled and market.btc_price > 0 and market.price_to_beat > 0:
-                    btc_diff = market.btc_price - market.price_to_beat
-                    time_left = market.get_time_left_seconds() if market.cycle_end_time > 0 else 3600
-                    calc_up, calc_dn = _calc_btc_binary_prob(market.btc_price, market.price_to_beat, time_left)
-
-                    if calc_up is not None:
-                        clob_vs_calc_diff = abs(up_val - calc_up)
-                        # If CLOB is >10¢ off from BTC-calculated price, CLOB is stale
-                        if clob_vs_calc_diff > 10:
-                            # Double-check with Gamma before overriding
-                            gamma_up_chk = None
-                            try:
-                                async with httpx.AsyncClient(timeout=3.0) as gamma_client:
-                                    gamma_chk = await gamma_client.get(f"https://gamma-api.polymarket.com/events?slug={slug}")
-                                gamma_chk_data = gamma_chk.json() if gamma_chk.status_code == 200 else []
-                                if gamma_chk_data and len(gamma_chk_data) > 0:
-                                    for gm_chk in gamma_chk_data[0].get("markets", []):
-                                        if not gm_chk.get("closed") and gm_chk.get("active"):
-                                            gp = json.loads(gm_chk.get("outcomePrices", "[]"))
-                                            go = json.loads(gm_chk.get("outcomes", "[]"))
-                                            gy = next((i for i, o in enumerate(go) if o.lower() in ("yes", "up", "above")), 0)
-                                            gn = next((i for i, o in enumerate(go) if o.lower() in ("no", "down", "below")), 1)
-                                            gamma_up_chk = max(1, min(99, round(float(gp[gy]) * 100)))
-                                            break
-                            except Exception:
-                                pass
-
-                            # Prefer Gamma if it agrees with BTC calc (not stale), else use BTC calc
-                            if gamma_up_chk and abs(gamma_up_chk - calc_up) < 10:
-                                # Gamma is fresh, use Gamma
-                                print(f"[PRICE-FIX] CLOB={up_val}/{dn_val} stale (BTC ${btc_diff:+.0f}), Gamma={gamma_up_chk}/{100-gamma_up_chk} agrees with calc={calc_up}/{calc_dn} → using Gamma")
-                                up_val = gamma_up_chk
-                                dn_val = max(1, min(99, 100 - gamma_up_chk))
-                                price_source = "gamma(btc-verified)"
-                            else:
-                                # Both CLOB and Gamma are stale, use BTC-calculated price
-                                gamma_info = f", Gamma={gamma_up_chk}" if gamma_up_chk else ", Gamma=N/A"
-                                print(f"[PRICE-FIX] CLOB={up_val}/{dn_val} stale (BTC ${btc_diff:+.0f}){gamma_info} → using BTC calc={calc_up}/{calc_dn}")
-                                up_val = calc_up
-                                dn_val = calc_dn
-                                price_source = "btc-calc"
-                        elif clob_vs_calc_diff > 5:
-                            print(f"[PRICE-CHK] CLOB={up_val}/{dn_val} vs BTC-calc={calc_up}/{calc_dn} (diff={clob_vs_calc_diff}¢, BTC ${btc_diff:+.0f}) — CLOB acceptable")
-
                 if not is_settled:
                     market.up_price = up_val
                     market.down_price = dn_val
@@ -2803,13 +2633,11 @@ async def _poll_live_prices():
                     market.history = [h for h in market.history if now - h[0] <= 300]
                     # --- Extract liquidity/spread from order book ---
                     try:
-                        up_asks = up_data.get("asks", [])
                         up_bids = up_data.get("bids", [])
-                        if up_asks:
-                            best_ask_price = min(float(a["price"]) for a in up_asks)
-                            ask_liq = sum(float(a["size"]) for a in up_asks if abs(float(a["price"]) - best_ask_price) < 0.01)
-                            market_ask_liquidity = round(ask_liq * best_ask_price, 2)
-                        if up_asks and up_bids:
+                        best_ask_price = up_raw
+                        ask_liq = sum(float(a["size"]) for a in up_asks if abs(float(a["price"]) - best_ask_price) < 0.01)
+                        market_ask_liquidity = round(ask_liq * best_ask_price, 2)
+                        if up_bids:
                             best_bid_price = max(float(b["price"]) for b in up_bids)
                             bid_liq = sum(float(b["size"]) for b in up_bids if abs(float(b["price"]) - best_bid_price) < 0.01)
                             market_bid_liquidity = round(bid_liq * best_bid_price, 2)
@@ -2819,11 +2647,9 @@ async def _poll_live_prices():
                             market_spread_cents = 0.0
                     except Exception:
                         pass
-                    print(f"[CLOB] UP={market.up_price}¢ DOWN={market.down_price}¢ via {price_source} | spread={market_spread_cents}¢ ask_liq=${market_ask_liquidity} bid_liq=${market_bid_liquidity}")
+                    print(f"[CLOB] UP={market.up_price}¢ DOWN={market.down_price}¢ | spread={market_spread_cents}¢ ask_liq=${market_ask_liquidity} bid_liq=${market_bid_liquidity}")
             else:
-                # ALL CLOB endpoints returned nothing — fall back to Gamma API
-                seconds_without_clob = time.time() - (clob_last_update_time if clob_last_update_time > 0 else market.cycle_end_time - market.cycle_duration)
-                print(f"[CLOB] All endpoints empty for {slug} ({seconds_without_clob:.0f}s without data)...")
+                # CLOB doesn't have both sides yet — refresh Gamma prices
                 try:
                     async with httpx.AsyncClient(timeout=5.0) as hclient:
                         gamma_resp = await hclient.get(f"https://gamma-api.polymarket.com/events?slug={slug}")
@@ -2842,15 +2668,11 @@ async def _poll_live_prices():
                                     market.up_price = g_up
                                     market.down_price = g_dn
                                     market.current_price = market.up_price
-                                    if seconds_without_clob > 30:
-                                        market.prices_loaded = True
-                                        clob_last_update_time = time.time()
-                                        print(f"[GAMMA-FALLBACK] ENABLED trading with Gamma prices UP={g_up}¢ DOWN={g_dn}¢ (CLOB empty >{seconds_without_clob:.0f}s)")
-                                    else:
-                                        print(f"[GAMMA-FALLBACK] Display prices UP={g_up}¢ DOWN={g_dn}¢ — waiting for CLOB ({30-seconds_without_clob:.0f}s)")
+                                    market.prices_loaded = True
+                                    print(f"[GAMMA] UP={g_up}¢ DOWN={g_dn}¢ (CLOB thin, using Gamma)")
                                 break
                 except Exception as e:
-                    print(f"[GAMMA-FALLBACK] Error: {e}")
+                    print(f"[GAMMA] Refresh error: {e}")
 
             # Fetch 24h volume from Gamma once every 5 minutes
             if time.time() - market_volume_updated > 300:
@@ -2876,7 +2698,30 @@ async def _poll_live_prices():
             except Exception:
                 pass  # Keep last known BTC price
 
-            # CLOB had token IDs — don't fall back to Gamma (which returns stale mid-prices)
+            # Fetch 24h volume from Gamma once every 5 minutes
+            if time.time() - market_volume_updated > 300:
+                try:
+                    async with httpx.AsyncClient(timeout=5.0) as hclient:
+                        vol_resp = await hclient.get(f"https://gamma-api.polymarket.com/events?slug={slug}")
+                    if vol_resp.status_code == 200:
+                        vol_data = vol_resp.json()
+                        if vol_data and isinstance(vol_data, list) and len(vol_data) > 0:
+                            raw_vol = vol_data[0].get("volume", 0)
+                            market_volume_24h = float(raw_vol) if raw_vol else 0.0
+                            market_volume_updated = time.time()
+                            print(f"[GAMMA] 24h volume=${market_volume_24h:,.0f}")
+                except Exception:
+                    pass
+
+            # Fetch real-time BTC price from Binance (for NCAIO strategy)
+            try:
+                async with httpx.AsyncClient(timeout=3.0) as hclient:
+                    btc_resp = await hclient.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT")
+                if btc_resp.status_code == 200:
+                    market.btc_price = float(btc_resp.json()["price"])
+            except Exception:
+                pass  # Keep last known BTC price
+
             return
 
         # No token IDs yet: use Gamma API to get initial prices
