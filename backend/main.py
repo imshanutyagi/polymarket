@@ -2713,6 +2713,50 @@ async def _poll_live_prices():
                 up_val = max(1, min(99, round(up_raw * 100)))
                 dn_val = max(1, min(99, round(dn_raw * 100)))
                 is_settled = (up_val <= 1 or dn_val <= 1 or up_val >= 99 or dn_val >= 99)
+
+                # ── STALE PRICE DETECTION ──
+                # If BTC is significantly above/below target but CLOB shows ~50/50, CLOB is stale.
+                # Override with Gamma prices which track the real market.
+                clob_seems_stale = False
+                if not is_settled and market.btc_price > 0 and market.price_to_beat > 0:
+                    btc_diff = market.btc_price - market.price_to_beat
+                    # If BTC is >$50 from target but CLOB UP is between 40-60%, it's stale
+                    if abs(btc_diff) > 50 and 40 <= up_val <= 60:
+                        clob_seems_stale = True
+                    # If BTC is >$150 from target but CLOB UP is between 30-70%, likely stale
+                    elif abs(btc_diff) > 150 and 30 <= up_val <= 70:
+                        clob_seems_stale = True
+
+                if clob_seems_stale:
+                    # Fetch Gamma prices for comparison
+                    try:
+                        async with httpx.AsyncClient(timeout=5.0) as gamma_client:
+                            gamma_chk = await gamma_client.get(f"https://gamma-api.polymarket.com/events?slug={slug}")
+                        gamma_chk_data = gamma_chk.json() if gamma_chk.status_code == 200 else []
+                        if gamma_chk_data and len(gamma_chk_data) > 0:
+                            for gm_chk in gamma_chk_data[0].get("markets", []):
+                                if not gm_chk.get("closed") and gm_chk.get("active"):
+                                    gp = json.loads(gm_chk.get("outcomePrices", "[]"))
+                                    go = json.loads(gm_chk.get("outcomes", "[]"))
+                                    gy = next((i for i, o in enumerate(go) if o.lower() in ("yes", "up", "above")), 0)
+                                    gn = next((i for i, o in enumerate(go) if o.lower() in ("no", "down", "below")), 1)
+                                    g_up = max(1, min(99, round(float(gp[gy]) * 100)))
+                                    g_dn = max(1, min(99, round(float(gp[gn]) * 100)))
+                                    g_settled = (g_up <= 1 or g_dn <= 1 or g_up >= 99 or g_dn >= 99)
+                                    # If Gamma differs from CLOB by >5¢, Gamma is more accurate
+                                    if not g_settled and abs(g_up - up_val) > 5:
+                                        btc_diff_disp = market.btc_price - market.price_to_beat
+                                        print(f"[CLOB-STALE] CLOB={up_val}/{dn_val} but BTC diff=${btc_diff_disp:+.0f}, Gamma={g_up}/{g_dn} → using Gamma")
+                                        up_val = g_up
+                                        dn_val = g_dn
+                                        price_source = "gamma(stale-override)"
+                                    else:
+                                        clob_seems_stale = False  # Gamma agrees with CLOB, not stale
+                                    break
+                    except Exception as e:
+                        print(f"[CLOB-STALE] Gamma check failed: {e}")
+                        clob_seems_stale = False  # Can't verify, trust CLOB
+
                 if not is_settled:
                     market.up_price = up_val
                     market.down_price = dn_val
