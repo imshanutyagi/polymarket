@@ -2614,11 +2614,33 @@ async def _poll_live_prices():
                     print(f"[CLOB] /book error: {e}")
 
             up_asks = up_data.get("asks", [])
+            up_bids = up_data.get("bids", [])
             dn_asks = dn_data.get("asks", [])
+            dn_bids = dn_data.get("bids", [])
 
-            if up_asks and dn_asks:
-                up_raw = min(float(a["price"]) for a in up_asks)
-                dn_raw = min(float(a["price"]) for a in dn_asks)
+            # Cross-book pricing (how Polymarket calculates "Buy Up X¢"):
+            # Buy UP = min(UP_best_ask, 1 - DOWN_best_bid)
+            # Buy DOWN = min(DOWN_best_ask, 1 - UP_best_bid)
+            up_direct = min(float(a["price"]) for a in up_asks) if up_asks else None
+            dn_direct = min(float(a["price"]) for a in dn_asks) if dn_asks else None
+            up_cross = (1.0 - max(float(b["price"]) for b in dn_bids)) if dn_bids else None
+            dn_cross = (1.0 - max(float(b["price"]) for b in up_bids)) if up_bids else None
+
+            # Pick best available price for each side
+            up_candidates = [p for p in [up_direct, up_cross] if p is not None and 0.01 < p < 0.99]
+            dn_candidates = [p for p in [dn_direct, dn_cross] if p is not None and 0.01 < p < 0.99]
+            up_raw = min(up_candidates) if up_candidates else None
+            dn_raw = min(dn_candidates) if dn_candidates else None
+
+            has_price = up_raw is not None and dn_raw is not None
+            if not has_price and up_raw is not None:
+                dn_raw = max(0.01, 1.0 - up_raw)
+                has_price = True
+            elif not has_price and dn_raw is not None:
+                up_raw = max(0.01, 1.0 - dn_raw)
+                has_price = True
+
+            if has_price:
                 up_val = max(1, min(99, round(up_raw * 100)))
                 dn_val = max(1, min(99, round(dn_raw * 100)))
                 is_settled = (up_val <= 1 or dn_val <= 1 or up_val >= 99 or dn_val >= 99)
@@ -2633,11 +2655,11 @@ async def _poll_live_prices():
                     market.history = [h for h in market.history if now - h[0] <= 300]
                     # --- Extract liquidity/spread from order book ---
                     try:
-                        up_bids = up_data.get("bids", [])
-                        best_ask_price = up_raw
-                        ask_liq = sum(float(a["size"]) for a in up_asks if abs(float(a["price"]) - best_ask_price) < 0.01)
-                        market_ask_liquidity = round(ask_liq * best_ask_price, 2)
-                        if up_bids:
+                        if up_asks:
+                            best_ask_price = min(float(a["price"]) for a in up_asks)
+                            ask_liq = sum(float(a["size"]) for a in up_asks if abs(float(a["price"]) - best_ask_price) < 0.01)
+                            market_ask_liquidity = round(ask_liq * best_ask_price, 2)
+                        if up_asks and up_bids:
                             best_bid_price = max(float(b["price"]) for b in up_bids)
                             bid_liq = sum(float(b["size"]) for b in up_bids if abs(float(b["price"]) - best_bid_price) < 0.01)
                             market_bid_liquidity = round(bid_liq * best_bid_price, 2)
@@ -2647,9 +2669,12 @@ async def _poll_live_prices():
                             market_spread_cents = 0.0
                     except Exception:
                         pass
-                    print(f"[CLOB] UP={market.up_price}¢ DOWN={market.down_price}¢ | spread={market_spread_cents}¢ ask_liq=${market_ask_liquidity} bid_liq=${market_bid_liquidity}")
+                    src = "book"
+                    if up_cross is not None and up_raw == up_cross: src = "cross-book"
+                    if dn_cross is not None and dn_raw == dn_cross: src = "cross-book"
+                    print(f"[CLOB] UP={up_val}¢ DOWN={dn_val}¢ via {src} | up_direct={up_direct} up_cross={up_cross} dn_direct={dn_direct} dn_cross={dn_cross} | spread={market_spread_cents}¢ ask_liq=${market_ask_liquidity} bid_liq=${market_bid_liquidity}")
             else:
-                # CLOB doesn't have both sides yet — refresh Gamma prices
+                # CLOB completely empty — refresh Gamma prices
                 try:
                     async with httpx.AsyncClient(timeout=5.0) as hclient:
                         gamma_resp = await hclient.get(f"https://gamma-api.polymarket.com/events?slug={slug}")
