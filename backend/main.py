@@ -2431,10 +2431,52 @@ async def auto_discover_market():
     """Automatically discover and sync with the current Polymarket BTC Up/Down market."""
     global live_token_ids, clob_last_update_time
     expired_slugs = set()  # Track all expired slugs to never reconnect to them
+    _prefetched_next = {}  # Pre-fetched next market data {slug, up_token, down_token, up_price, dn_price}
 
     while True:
         try:
-            if market.is_live and market.get_time_left_seconds() > 30:
+            time_left = market.get_time_left_seconds() if market.is_live else 0
+
+            # Pre-fetch next market 90 seconds before cycle ends (so CLOB has data at transition)
+            if market.is_live and 30 < time_left <= 90 and not _prefetched_next:
+                try:
+                    from datetime import timezone, timedelta
+                    try:
+                        from zoneinfo import ZoneInfo
+                        et_offset = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York")).utcoffset()
+                    except Exception:
+                        et_offset = timedelta(hours=-4)
+                    current_time = datetime.now(timezone.utc)
+                    next_et = current_time + et_offset + timedelta(hours=1)
+                    nxt_h24 = next_et.hour
+                    nxt_ampm = "pm" if nxt_h24 >= 12 else "am"
+                    nxt_h12 = nxt_h24 % 12 or 12
+                    next_slug = f"bitcoin-up-or-down-{next_et.strftime('%B').lower()}-{next_et.day}-{next_et.year}-{nxt_h12}{nxt_ampm}-et"
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        resp = await client.get(f"https://gamma-api.polymarket.com/events?slug={next_slug}")
+                        data = resp.json() if resp.status_code == 200 else []
+                    if data and len(data) > 0 and not data[0].get("closed"):
+                        for m in data[0].get("markets", []):
+                            if not m.get("closed") and m.get("active"):
+                                outcomes = json.loads(m.get("outcomes", "[]"))
+                                tokens = json.loads(m.get("clobTokenIds", "[]"))
+                                prices = json.loads(m.get("outcomePrices", "[]"))
+                                yes_idx = next((i for i, o in enumerate(outcomes) if o.lower() in ("yes", "up", "above")), 0)
+                                no_idx = next((i for i, o in enumerate(outcomes) if o.lower() in ("no", "down", "below")), 1)
+                                if len(tokens) > 1:
+                                    _prefetched_next = {
+                                        "slug": next_slug,
+                                        "up_token": tokens[yes_idx],
+                                        "down_token": tokens[no_idx],
+                                        "up_price": round(float(prices[yes_idx]) * 100) if len(prices) > yes_idx else 50,
+                                        "dn_price": round(float(prices[no_idx]) * 100) if len(prices) > no_idx else 50,
+                                    }
+                                    print(f"[AUTO] Pre-fetched NEXT market: {next_slug} (tokens ready, UP={_prefetched_next['up_price']}¢ DN={_prefetched_next['dn_price']}¢)")
+                                break
+                except Exception as e:
+                    print(f"[AUTO] Pre-fetch error: {e}")
+
+            if market.is_live and time_left > 30:
                 # Already synced and plenty of time left — check again in 5s
                 await asyncio.sleep(5)
                 continue
@@ -2451,6 +2493,37 @@ async def auto_discover_market():
                 live_token_ids.clear()
                 market.prices_loaded = False  # Block trading until new market prices confirmed
                 clob_last_update_time = 0.0   # Must get fresh CLOB price before AI can trade
+
+            # Use pre-fetched data for instant transition
+            if _prefetched_next:
+                pf = _prefetched_next
+                slug = pf["slug"]
+                if slug not in expired_slugs:
+                    live_token_ids["up"] = pf["up_token"]
+                    live_token_ids["down"] = pf["down_token"]
+                    with open("tokens.json", "w") as f:
+                        json.dump([pf["up_token"], pf["down_token"]], f)
+                    next_hour = (int(time.time()) // 3600 + 1) * 3600
+                    time_remaining = next_hour - int(time.time())
+                    up_clamped = max(1, min(99, pf["up_price"]))
+                    dn_clamped = max(1, min(99, pf["dn_price"]))
+                    market.is_live = True
+                    market.transitioning = False
+                    market.live_slug = slug
+                    is_settled = (up_clamped <= 1 or dn_clamped <= 1 or up_clamped >= 99 or dn_clamped >= 99)
+                    if not is_settled:
+                        market.up_price = up_clamped
+                        market.down_price = dn_clamped
+                        market.prices_loaded = True
+                    market.cycle_duration = time_remaining
+                    market.cycle_end_time = time.time() + time_remaining
+                    market.history = []
+                    print(f"[AUTO] INSTANT transition to {slug} (pre-fetched tokens ready)")
+                    print(f"[AUTO] UP: {up_clamped}¢ | DOWN: {dn_clamped}¢ | Time: {time_remaining}s")
+                    _prefetched_next = {}
+                    await asyncio.sleep(5)
+                    continue
+                _prefetched_next = {}
 
             now_secs = int(time.time())
             from datetime import timezone, timedelta
