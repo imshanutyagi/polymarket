@@ -2597,7 +2597,10 @@ async def _poll_live_prices():
             except Exception as e:
                 print(f"[CLOB] Failed to fetch token IDs: {e}")
 
-        # ── PRICING: /book first (exact match to Polymarket buttons), /price+/midpoint fallback ──
+        # ── PRICING: Cross-book pricing (matches Polymarket UI exactly) ──
+        # Polymarket "Buy UP" = min(UP_best_ask, 1 - DOWN_best_bid)
+        # Polymarket "Buy DOWN" = min(DOWN_best_ask, 1 - UP_best_bid)
+        # This is because buying UP at X¢ is the same as selling DOWN at (1-X)¢
         if up_token and down_token:
             up_raw = None
             dn_raw = None
@@ -2606,7 +2609,7 @@ async def _poll_live_prices():
             dn_data = {}
 
             async with httpx.AsyncClient(timeout=5.0) as hclient:
-                # Step 1: Try /book orderbook (best ask = EXACT price on Polymarket buy buttons)
+                # Step 1: Fetch BOTH orderbooks (we need asks AND bids from both)
                 try:
                     up_resp, dn_resp = await asyncio.gather(
                         hclient.get(f"https://clob.polymarket.com/book?token_id={up_token}"),
@@ -2614,20 +2617,43 @@ async def _poll_live_prices():
                     )
                     up_data = up_resp.json() if up_resp.status_code == 200 else {}
                     dn_data = dn_resp.json() if dn_resp.status_code == 200 else {}
+
                     up_asks = up_data.get("asks", [])
+                    up_bids = up_data.get("bids", [])
                     dn_asks = dn_data.get("asks", [])
-                    if up_asks:
-                        up_raw = min(float(a["price"]) for a in up_asks)
-                    if dn_asks:
-                        dn_raw = min(float(a["price"]) for a in dn_asks)
+                    dn_bids = dn_data.get("bids", [])
+
+                    # Direct prices (best ask on each token's orderbook)
+                    up_direct = min(float(a["price"]) for a in up_asks) if up_asks else None
+                    dn_direct = min(float(a["price"]) for a in dn_asks) if dn_asks else None
+
+                    # Cross-book prices (derived from the OTHER token's best bid)
+                    # Buying UP = selling DOWN, so UP price = 1 - DOWN_best_bid
+                    up_cross = (1.0 - max(float(b["price"]) for b in dn_bids)) if dn_bids else None
+                    # Buying DOWN = selling UP, so DOWN price = 1 - UP_best_bid
+                    dn_cross = (1.0 - max(float(b["price"]) for b in up_bids)) if up_bids else None
+
+                    # Take the BEST (lowest) price from direct or cross-book (same as Polymarket UI)
+                    candidates_up = [p for p in [up_direct, up_cross] if p is not None and 0.01 < p < 0.99]
+                    candidates_dn = [p for p in [dn_direct, dn_cross] if p is not None and 0.01 < p < 0.99]
+
+                    if candidates_up:
+                        up_raw = min(candidates_up)
+                    if candidates_dn:
+                        dn_raw = min(candidates_dn)
+
                     if up_raw and dn_raw:
-                        price_source = "book"
+                        price_source = "book-cross"
                     elif up_raw or dn_raw:
-                        price_source = "book(partial)"
+                        price_source = "book-cross(partial)"
+
+                    # Debug logging
+                    print(f"[CLOB-DEBUG] UP: direct={up_direct} cross={up_cross} → {up_raw} | DN: direct={dn_direct} cross={dn_cross} → {dn_raw}")
+
                 except Exception as e:
                     print(f"[CLOB] /book endpoint error: {e}")
 
-                # Step 2: If /book didn't give both sides, try /price (computed, works with thin books)
+                # Step 2: If /book didn't give both sides, try /price
                 if not up_raw or not dn_raw:
                     try:
                         price_tasks = []
@@ -2675,7 +2701,7 @@ async def _poll_live_prices():
                     except Exception as e:
                         print(f"[CLOB] /midpoint endpoint error: {e}")
 
-            # Derive missing side from the other (binary market: UP + DOWN ≈ 1.00)
+            # Last resort: derive missing side from the other
             if up_raw and not dn_raw:
                 dn_raw = max(0.01, 1.0 - up_raw)
                 price_source += "(dn-derived)"

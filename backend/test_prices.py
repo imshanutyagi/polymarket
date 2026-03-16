@@ -68,43 +68,51 @@ async def main():
         print(f"UP token:   {up_token[:30]}...")
         print(f"DOWN token: {down_token[:30]}...")
 
-        # 1. /book endpoint
-        print(f"\n--- /book (orderbook best ask = Polymarket buy button price) ---")
+        # 1. /book endpoint + cross-book pricing
+        print(f"\n--- /book (cross-book pricing = Polymarket buy button price) ---")
+        up_direct = None; dn_direct = None
+        up_cross = None; dn_cross = None
         try:
             bu, bd = await asyncio.gather(
                 hc.get(f"https://clob.polymarket.com/book?token_id={up_token}"),
                 hc.get(f"https://clob.polymarket.com/book?token_id={down_token}"),
             )
+            up_asks, up_bids, dn_asks, dn_bids = [], [], [], []
             if bu.status_code == 200:
                 ud = bu.json()
-                asks = ud.get("asks", [])
-                bids = ud.get("bids", [])
-                if asks:
-                    best_ask = min(float(a["price"]) for a in asks)
-                    print(f"  UP best ask: {best_ask} = {round(best_ask*100)}¢  ({len(asks)} asks, {len(bids)} bids)")
-                    # Show top 3 asks
-                    sorted_asks = sorted(asks, key=lambda a: float(a["price"]))[:3]
-                    for a in sorted_asks:
-                        print(f"    ask: price={a['price']} size={a['size']}")
+                up_asks = ud.get("asks", [])
+                up_bids = ud.get("bids", [])
+                if up_asks:
+                    up_direct = min(float(a["price"]) for a in up_asks)
+                    print(f"  UP direct (best ask): {up_direct} = {round(up_direct*100)}¢  ({len(up_asks)} asks)")
                 else:
-                    print(f"  UP: NO ASKS ({len(bids)} bids)")
-            else:
-                print(f"  UP /book returned status {bu.status_code}")
+                    print(f"  UP: NO ASKS ({len(up_bids)} bids)")
+                if up_bids:
+                    up_best_bid = max(float(b["price"]) for b in up_bids)
+                    dn_cross = 1.0 - up_best_bid
+                    print(f"  DN cross (1 - UP best bid {up_best_bid}): {dn_cross:.4f} = {round(dn_cross*100)}¢")
 
             if bd.status_code == 200:
                 dd = bd.json()
-                asks = dd.get("asks", [])
-                bids = dd.get("bids", [])
-                if asks:
-                    best_ask = min(float(a["price"]) for a in asks)
-                    print(f"  DN best ask: {best_ask} = {round(best_ask*100)}¢  ({len(asks)} asks, {len(bids)} bids)")
-                    sorted_asks = sorted(asks, key=lambda a: float(a["price"]))[:3]
-                    for a in sorted_asks:
-                        print(f"    ask: price={a['price']} size={a['size']}")
+                dn_asks = dd.get("asks", [])
+                dn_bids = dd.get("bids", [])
+                if dn_asks:
+                    dn_direct = min(float(a["price"]) for a in dn_asks)
+                    print(f"  DN direct (best ask): {dn_direct} = {round(dn_direct*100)}¢  ({len(dn_asks)} asks)")
                 else:
-                    print(f"  DN: NO ASKS ({len(bids)} bids)")
-            else:
-                print(f"  DN /book returned status {bd.status_code}")
+                    print(f"  DN: NO ASKS ({len(dn_bids)} bids)")
+                if dn_bids:
+                    dn_best_bid = max(float(b["price"]) for b in dn_bids)
+                    up_cross = 1.0 - dn_best_bid
+                    print(f"  UP cross (1 - DN best bid {dn_best_bid}): {up_cross:.4f} = {round(up_cross*100)}¢")
+
+            # Final cross-book price (same as Polymarket UI)
+            up_candidates = [p for p in [up_direct, up_cross] if p and 0.01 < p < 0.99]
+            dn_candidates = [p for p in [dn_direct, dn_cross] if p and 0.01 < p < 0.99]
+            up_final = min(up_candidates) if up_candidates else None
+            dn_final = min(dn_candidates) if dn_candidates else None
+            print(f"\n  >>> CROSS-BOOK RESULT: UP={round(up_final*100) if up_final else '?'}¢  DOWN={round(dn_final*100) if dn_final else '?'}¢ <<<")
+            print(f"  (This should match Polymarket's Buy buttons exactly)")
         except Exception as e:
             print(f"  /book ERROR: {e}")
 
