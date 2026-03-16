@@ -2561,6 +2561,36 @@ async def auto_discover_market():
             print(f"[AUTO] Discovery error: {e}")
             await asyncio.sleep(15)
 
+def _calc_btc_binary_prob(btc_price: float, target: float, seconds_left: float) -> tuple:
+    """Calculate BTC binary option probability from price, target, and time remaining.
+    Uses Black-Scholes-style log-normal model calibrated to match Polymarket pricing."""
+    import math
+    if target <= 0 or btc_price <= 0 or seconds_left <= 0:
+        return None, None
+    ANNUAL_VOL = 0.40  # 40% annualized BTC volatility (calibrated to Polymarket)
+    hours_left = seconds_left / 3600.0
+    time_years = hours_left / 8760.0
+    sigma = ANNUAL_VOL * math.sqrt(time_years)
+    if sigma < 1e-10:
+        up = 99 if btc_price > target else 1
+        return up, 100 - up
+    d = (math.log(btc_price / target) + 0.5 * sigma * sigma) / sigma
+    # Normal CDF approximation (Abramowitz & Stegun)
+    def _norm_cdf(x):
+        if x > 6: return 1.0
+        if x < -6: return 0.0
+        a1, a2, a3, a4, a5 = 0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429
+        p = 0.3275911
+        sign = 1 if x >= 0 else -1
+        t = 1.0 / (1.0 + p * abs(x))
+        y = 1.0 - (((((a5*t + a4)*t) + a3)*t + a2)*t + a1) * t * math.exp(-x*x/2)
+        return 0.5 * (1.0 + sign * y)
+    prob_up = _norm_cdf(d)
+    up_cents = max(1, min(99, round(prob_up * 100)))
+    dn_cents = max(1, min(99, 100 - up_cents))
+    return up_cents, dn_cents
+
+
 async def _poll_live_prices():
     """Poll CLOB order book for live price updates. ALL pricing from Polymarket CLOB only."""
     global clob_last_update_time, market_ask_liquidity, market_bid_liquidity, market_spread_cents, market_volume_24h, market_volume_updated
@@ -2715,47 +2745,52 @@ async def _poll_live_prices():
                 is_settled = (up_val <= 1 or dn_val <= 1 or up_val >= 99 or dn_val >= 99)
 
                 # ── STALE PRICE DETECTION ──
-                # If BTC is significantly above/below target but CLOB shows ~50/50, CLOB is stale.
-                # Override with Gamma prices which track the real market.
-                clob_seems_stale = False
+                # At cycle start, CLOB and Gamma both return stale ~50/50 prices.
+                # The Polymarket UI uses an internal pricing engine we can't access.
+                # Fix: Calculate probability from BTC price vs target using Black-Scholes model.
                 if not is_settled and market.btc_price > 0 and market.price_to_beat > 0:
                     btc_diff = market.btc_price - market.price_to_beat
-                    # If BTC is >$50 from target but CLOB UP is between 40-60%, it's stale
-                    if abs(btc_diff) > 50 and 40 <= up_val <= 60:
-                        clob_seems_stale = True
-                    # If BTC is >$150 from target but CLOB UP is between 30-70%, likely stale
-                    elif abs(btc_diff) > 150 and 30 <= up_val <= 70:
-                        clob_seems_stale = True
+                    time_left = market.get_time_left_seconds() if market.cycle_end_time > 0 else 3600
+                    calc_up, calc_dn = _calc_btc_binary_prob(market.btc_price, market.price_to_beat, time_left)
 
-                if clob_seems_stale:
-                    # Fetch Gamma prices for comparison
-                    try:
-                        async with httpx.AsyncClient(timeout=5.0) as gamma_client:
-                            gamma_chk = await gamma_client.get(f"https://gamma-api.polymarket.com/events?slug={slug}")
-                        gamma_chk_data = gamma_chk.json() if gamma_chk.status_code == 200 else []
-                        if gamma_chk_data and len(gamma_chk_data) > 0:
-                            for gm_chk in gamma_chk_data[0].get("markets", []):
-                                if not gm_chk.get("closed") and gm_chk.get("active"):
-                                    gp = json.loads(gm_chk.get("outcomePrices", "[]"))
-                                    go = json.loads(gm_chk.get("outcomes", "[]"))
-                                    gy = next((i for i, o in enumerate(go) if o.lower() in ("yes", "up", "above")), 0)
-                                    gn = next((i for i, o in enumerate(go) if o.lower() in ("no", "down", "below")), 1)
-                                    g_up = max(1, min(99, round(float(gp[gy]) * 100)))
-                                    g_dn = max(1, min(99, round(float(gp[gn]) * 100)))
-                                    g_settled = (g_up <= 1 or g_dn <= 1 or g_up >= 99 or g_dn >= 99)
-                                    # If Gamma differs from CLOB by >5¢, Gamma is more accurate
-                                    if not g_settled and abs(g_up - up_val) > 5:
-                                        btc_diff_disp = market.btc_price - market.price_to_beat
-                                        print(f"[CLOB-STALE] CLOB={up_val}/{dn_val} but BTC diff=${btc_diff_disp:+.0f}, Gamma={g_up}/{g_dn} → using Gamma")
-                                        up_val = g_up
-                                        dn_val = g_dn
-                                        price_source = "gamma(stale-override)"
-                                    else:
-                                        clob_seems_stale = False  # Gamma agrees with CLOB, not stale
-                                    break
-                    except Exception as e:
-                        print(f"[CLOB-STALE] Gamma check failed: {e}")
-                        clob_seems_stale = False  # Can't verify, trust CLOB
+                    if calc_up is not None:
+                        clob_vs_calc_diff = abs(up_val - calc_up)
+                        # If CLOB is >10¢ off from BTC-calculated price, CLOB is stale
+                        if clob_vs_calc_diff > 10:
+                            # Double-check with Gamma before overriding
+                            gamma_up_chk = None
+                            try:
+                                async with httpx.AsyncClient(timeout=3.0) as gamma_client:
+                                    gamma_chk = await gamma_client.get(f"https://gamma-api.polymarket.com/events?slug={slug}")
+                                gamma_chk_data = gamma_chk.json() if gamma_chk.status_code == 200 else []
+                                if gamma_chk_data and len(gamma_chk_data) > 0:
+                                    for gm_chk in gamma_chk_data[0].get("markets", []):
+                                        if not gm_chk.get("closed") and gm_chk.get("active"):
+                                            gp = json.loads(gm_chk.get("outcomePrices", "[]"))
+                                            go = json.loads(gm_chk.get("outcomes", "[]"))
+                                            gy = next((i for i, o in enumerate(go) if o.lower() in ("yes", "up", "above")), 0)
+                                            gn = next((i for i, o in enumerate(go) if o.lower() in ("no", "down", "below")), 1)
+                                            gamma_up_chk = max(1, min(99, round(float(gp[gy]) * 100)))
+                                            break
+                            except Exception:
+                                pass
+
+                            # Prefer Gamma if it agrees with BTC calc (not stale), else use BTC calc
+                            if gamma_up_chk and abs(gamma_up_chk - calc_up) < 10:
+                                # Gamma is fresh, use Gamma
+                                print(f"[PRICE-FIX] CLOB={up_val}/{dn_val} stale (BTC ${btc_diff:+.0f}), Gamma={gamma_up_chk}/{100-gamma_up_chk} agrees with calc={calc_up}/{calc_dn} → using Gamma")
+                                up_val = gamma_up_chk
+                                dn_val = max(1, min(99, 100 - gamma_up_chk))
+                                price_source = "gamma(btc-verified)"
+                            else:
+                                # Both CLOB and Gamma are stale, use BTC-calculated price
+                                gamma_info = f", Gamma={gamma_up_chk}" if gamma_up_chk else ", Gamma=N/A"
+                                print(f"[PRICE-FIX] CLOB={up_val}/{dn_val} stale (BTC ${btc_diff:+.0f}){gamma_info} → using BTC calc={calc_up}/{calc_dn}")
+                                up_val = calc_up
+                                dn_val = calc_dn
+                                price_source = "btc-calc"
+                        elif clob_vs_calc_diff > 5:
+                            print(f"[PRICE-CHK] CLOB={up_val}/{dn_val} vs BTC-calc={calc_up}/{calc_dn} (diff={clob_vs_calc_diff}¢, BTC ${btc_diff:+.0f}) — CLOB acceptable")
 
                 if not is_settled:
                     market.up_price = up_val
