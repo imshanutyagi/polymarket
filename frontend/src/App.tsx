@@ -1428,12 +1428,12 @@ function App() {
                       style={{padding: '4px 8px', background: '#805ad5', color: 'white', border: 'none', borderRadius: '4px', fontSize: '11px', cursor: 'pointer', whiteSpace: 'nowrap'}}
                     >{aiTesting ? '...' : 'Test'}</button>
                   </div>
-                  {aiTestResult && (
+                  {aiTestResult != null && (
                     <div style={{marginTop: '6px', padding: '6px 8px', borderRadius: '4px', fontSize: '11px',
-                      background: aiTestResult.ok ? 'rgba(72,187,120,0.15)' : 'rgba(252,129,129,0.15)',
-                      color: aiTestResult.ok ? '#48bb78' : '#fc8181',
-                      border: `1px solid ${aiTestResult.ok ? '#48bb78' : '#fc8181'}`}}>
-                      {aiTestResult.message}
+                      background: (aiTestResult as any).ok ? 'rgba(72,187,120,0.15)' : 'rgba(252,129,129,0.15)',
+                      color: (aiTestResult as any).ok ? '#48bb78' : '#fc8181',
+                      border: `1px solid ${(aiTestResult as any).ok ? '#48bb78' : '#fc8181'}`}}>
+                      {(aiTestResult as any).message}
                     </div>
                   )}
                   {aiAgent.enabled && (
