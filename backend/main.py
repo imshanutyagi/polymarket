@@ -2380,6 +2380,11 @@ async def market_loop():
 
             # ═══ NEW CLAUDE ALL-IN-ONE STRATEGY ═══════════════════════════
             if active_strategy_ncaio and time_left > 0:
+                # Debug log every 30s so we can see why NCAIO isn't entering
+                if int(time_left) % 30 == 0:
+                    print(f"[NCAIO-DBG] phase={ncaio_strategy.phase} conf={ncaio_strategy.confidence} "
+                          f"UP={market.up_price}¢ DN={market.down_price}¢ trades={ncaio_strategy.completed_trade_count}/{ncaio_strategy.config.max_trades_per_cycle} "
+                          f"active={'YES' if ncaio_strategy._has_active_trade() else 'NO'} bal=${portfolio.balance:.2f}")
                 ncaio_actions = ncaio_strategy.on_tick(
                     time_remaining=time_left,
                     up_price=market.up_price,
