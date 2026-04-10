@@ -876,13 +876,9 @@ function App() {
                 </thead>
                 <tbody>
                   {(() => {
-                    const STAT_KEYS = ["strategy_a","strategy_b","strategy_c","strategy_c_trailing","strategy_d","strategy_e","strategy_f","strategy_7","strategy_cpt","strategy_claude"];
+                    const STAT_KEYS = ["strategy_claude","strategy_ncaio"];
                     const labels: Record<string,string> = {
-                      strategy_a: "Smart Balancer", strategy_b: "Momentum Sniper",
-                      strategy_c: "Fixed Target", strategy_c_trailing: "C+Trailing",
-                      strategy_d: "Strategy D", strategy_e: "Strategy E",
-                      strategy_f: "Strategy F", strategy_7: "Strategy 7",
-                      strategy_cpt: "CPT", strategy_claude: "Claude AI", strategy_ncaio: "NCAIO"
+                      strategy_claude: "Claude AI", strategy_ncaio: "NCAIO"
                     };
                     return STAT_KEYS.map(key => {
                       const s = strategyStats[key] ?? {trades:0,wins:0,total_profit:0,best:0,worst:0};
@@ -1645,6 +1641,8 @@ function App() {
               )}
             </div>
 
+            {/* === HIDDEN OLD STRATEGIES (kept in backend, hidden from UI) === */}
+            {false && (<>
             <div
               onClick={() => toggleStrategy('A')}
               className={`p-4 rounded-xl border cursor-pointer transition-colors ${strategies.strategy_a
@@ -1863,7 +1861,8 @@ function App() {
                 ))}
               </div>
             </div>
-
+            </>)}
+            {/* === END HIDDEN OLD STRATEGIES === */}
 
           </div>
 
