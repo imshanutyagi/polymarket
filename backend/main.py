@@ -2839,19 +2839,17 @@ async def auto_discover_market():
                         pf_h12 = int(pf_time.replace("am","").replace("pm",""))
                         pf_h24 = pf_h12 % 12 + (12 if pf_ampm == "pm" else 0)
                         end_h24 = pf_h24 + 1
-                        from datetime import timezone as tz_mod2, timedelta as td2
+                        from datetime import timezone as tz_mod2
                         try:
                             from zoneinfo import ZoneInfo
-                            et_off = datetime.now(tz_mod2.utc).astimezone(ZoneInfo("America/New_York")).utcoffset()
+                            cur_et2 = datetime.now(tz_mod2.utc).astimezone(ZoneInfo("America/New_York"))
                         except Exception:
-                            et_off = td2(hours=-4)
-                        cur_et2 = datetime.now(tz_mod2.utc) + et_off
+                            cur_et2 = datetime.now(tz_mod2.utc) + timedelta(hours=-4)
                         today_et2 = cur_et2.replace(hour=0, minute=0, second=0, microsecond=0)
                         end_et2 = today_et2.replace(hour=end_h24 % 24)
                         if end_h24 >= 24:
-                            end_et2 = end_et2 + td2(days=1)
-                        end_utc2 = int(end_et2.timestamp()) - int(et_off.total_seconds())
-                        time_remaining = max(30, end_utc2 - int(time.time()))
+                            end_et2 = end_et2 + timedelta(days=1)
+                        time_remaining = max(30, int(end_et2.timestamp()) - int(time.time()))
                     except Exception:
                         next_hour = (int(time.time()) // 3600 + 1) * 3600
                         time_remaining = next_hour - int(time.time())
@@ -2941,26 +2939,19 @@ async def auto_discover_market():
                                     # Calculate time remaining until market closes (next ET hour boundary)
                                     # Parse the hour from the slug to compute exact end time
                                     try:
-                                        # Extract hour from slug: e.g. "5pm" from "bitcoin-up-or-down-april-10-2026-5pm-et"
                                         slug_parts = slug.replace("-et", "").split("-")
                                         slug_time = slug_parts[-1]  # e.g. "5pm"
                                         slug_ampm = "pm" if "pm" in slug_time else "am"
                                         slug_hour12 = int(slug_time.replace("am","").replace("pm",""))
                                         slug_hour24 = slug_hour12 % 12 + (12 if slug_ampm == "pm" else 0)
-                                        # Market ends 1 hour after slug time, in ET
-                                        end_hour24 = slug_hour24 + 1
-                                        # Convert ET end time to UTC
-                                        et_offset_secs = int(et_offset.total_seconds())
-                                        # Build end timestamp: today's date + end_hour in ET → UTC
+                                        end_hour24 = slug_hour24 + 1  # market ends 1 hour after slug
+                                        # Build ET end time (timezone-aware) — .timestamp() auto-converts to UTC
                                         today_et = current_et.replace(hour=0, minute=0, second=0, microsecond=0)
-                                        from datetime import timezone as tz_mod
                                         end_et = today_et.replace(hour=end_hour24 % 24)
                                         if end_hour24 >= 24:
                                             end_et = end_et + timedelta(days=1)
-                                        end_utc_ts = int(end_et.timestamp()) - et_offset_secs
-                                        time_remaining = max(30, end_utc_ts - now_secs)
+                                        time_remaining = max(30, int(end_et.timestamp()) - now_secs)
                                     except Exception:
-                                        # Fallback: next UTC hour boundary
                                         next_hour = (now_secs // 3600 + 1) * 3600
                                         time_remaining = next_hour - now_secs
 
