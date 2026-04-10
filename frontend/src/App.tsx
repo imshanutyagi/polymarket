@@ -404,10 +404,10 @@ function App() {
             setAiTesting(false);
             return;
           }
-          if (msg.type === "state_update") {
-            setMarket(msg.data.market);
-            setPortfolio(msg.data.portfolio);
-            setStrategies(msg.data.strategies);
+          if (msg.type === "state_update" && msg.data) {
+            if (msg.data.market) setMarket(msg.data.market);
+            if (msg.data.portfolio) setPortfolio(msg.data.portfolio);
+            if (msg.data.strategies) setStrategies(msg.data.strategies);
             if (msg.data.strategy_stats) setStrategyStats(msg.data.strategy_stats);
             if (msg.data.ai_agent) setAiAgent(msg.data.ai_agent);
 
@@ -438,6 +438,7 @@ function App() {
       socket.onclose = () => {
         console.log("WebSocket disconnected. Reconnecting in 2s...");
         setWsConnected(false);
+        clearTimeout(reconnectTimer); // Clear any existing timer before setting new one
         reconnectTimer = setTimeout(connect, 2000);
       };
 

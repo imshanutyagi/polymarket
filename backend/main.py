@@ -881,6 +881,7 @@ clob_last_update_time = 0.0  # Unix timestamp of last successful CLOB price upda
 market_ask_liquidity  = 0.0   # total USDC available to BUY on best ask (how easy to enter)
 market_bid_liquidity  = 0.0   # total USDC available to SELL on best bid (how easy to exit)
 market_spread_cents   = 0.0   # bid-ask spread in cents (tight = liquid, wide = illiquid)
+market_tick_size      = "0.01"  # dynamic tick size from CLOB /book response
 market_volume_24h     = 0.0   # 24h trading volume in USDC (from Gamma API)
 market_volume_updated = 0.0   # timestamp of last volume fetch
 try:
@@ -913,8 +914,8 @@ async def _try_order(order_args: "OrderArgs", order_type: "OrderType") -> tuple:
             try:
                 try:
                     from py_clob_client.clob_types import CreateOrderOptions
-                    # tick_size=0.01 for BTC hourly markets, neg_risk via options
-                    opts = CreateOrderOptions(neg_risk=neg_risk, tick_size="0.01")
+                    # Use dynamic tick_size from CLOB /book response
+                    opts = CreateOrderOptions(neg_risk=neg_risk, tick_size=market_tick_size)
                     signed = await asyncio.to_thread(client.create_order, order_args, opts)
                 except (ImportError, TypeError):
                     signed = await asyncio.to_thread(client.create_order, order_args)
@@ -1321,8 +1322,8 @@ async def get_ncaio_ai_confirmation(entry_context: dict) -> tuple:
         print(f"[NCAIO-AI] {text} | model={ncaio_ai_model} | side={entry_context.get('side')}")
         return confirmed, text
     except Exception as e:
-        print(f"[NCAIO-AI] Timeout/error: {e} — auto-confirming")
-        return True, f"timeout: {e}"
+        print(f"[NCAIO-AI] Timeout/error: {e} — rejecting (safety)")
+        return False, f"timeout: {e}"
 
 
 async def ai_direct_buy(direction: str) -> bool:
@@ -2413,22 +2414,29 @@ async def market_loop():
             await asyncio.sleep(1)
 
 async def stream_live_prices():
-    """Poll CLOB midpoint every second — fallback when WebSocket is not connected."""
+    """Poll CLOB REST as fallback — only when WebSocket hasn't updated recently."""
+    _rest_backoff = 2  # start at 2s, increase on consecutive fallbacks
     while True:
         try:
             if not market.is_live:
                 await asyncio.sleep(2)
+                _rest_backoff = 2
                 continue
 
             # Only poll REST if WebSocket hasn't updated in the last 5 seconds
             ws_age = time.time() - clob_last_update_time if clob_last_update_time > 0 else float('inf')
             if ws_age > 5:
                 await _poll_live_prices()
-            await asyncio.sleep(1)
+                # Backoff: 2s → 3s → 5s → 10s max to avoid rate-limiting
+                await asyncio.sleep(min(_rest_backoff, 10))
+                _rest_backoff = min(_rest_backoff + 1, 10)
+            else:
+                _rest_backoff = 2  # reset backoff when WS is healthy
+                await asyncio.sleep(2)
 
         except Exception as e:
             print(f"[PRICE] Poll error: {e}")
-            await asyncio.sleep(2)
+            await asyncio.sleep(5)
 
 
 # ═══ POLYMARKET WEBSOCKET — REAL-TIME ORDERBOOK STREAMING ═══════════════════
@@ -2878,7 +2886,7 @@ async def auto_discover_market():
 async def _poll_live_prices():
     """Poll CLOB order book for live price updates — simple approach matching commit 7f6f2db.
     Gamma prices are set in auto_discover (immediate). CLOB /book overrides when available."""
-    global clob_last_update_time, market_ask_liquidity, market_bid_liquidity, market_spread_cents, market_volume_24h, market_volume_updated
+    global clob_last_update_time, market_ask_liquidity, market_bid_liquidity, market_spread_cents, market_volume_24h, market_volume_updated, market_tick_size
     try:
         slug = market.live_slug
         if not slug:
@@ -2932,6 +2940,11 @@ async def _poll_live_prices():
             up_bids = up_data.get("bids", [])
             dn_asks = dn_data.get("asks", [])
             dn_bids = dn_data.get("bids", [])
+
+            # Extract tick_size from book market metadata if available
+            book_market = up_data.get("market", {})
+            if isinstance(book_market, dict) and book_market.get("tick_size"):
+                market_tick_size = str(book_market["tick_size"])
 
             # Cross-book pricing (how Polymarket calculates "Buy Up X¢"):
             # Buy UP = min(UP_best_ask, 1 - DOWN_best_bid)
@@ -3013,30 +3026,6 @@ async def _poll_live_prices():
                                 break
                 except Exception as e:
                     print(f"[GAMMA] Refresh error: {e}")
-
-            # Fetch 24h volume from Gamma once every 5 minutes
-            if time.time() - market_volume_updated > 300:
-                try:
-                    async with httpx.AsyncClient(timeout=5.0) as hclient:
-                        vol_resp = await hclient.get(f"https://gamma-api.polymarket.com/events?slug={slug}")
-                    if vol_resp.status_code == 200:
-                        vol_data = vol_resp.json()
-                        if vol_data and isinstance(vol_data, list) and len(vol_data) > 0:
-                            raw_vol = vol_data[0].get("volume", 0)
-                            market_volume_24h = float(raw_vol) if raw_vol else 0.0
-                            market_volume_updated = time.time()
-                            print(f"[GAMMA] 24h volume=${market_volume_24h:,.0f}")
-                except Exception:
-                    pass
-
-            # Fetch real-time BTC price from Binance (for NCAIO strategy)
-            try:
-                async with httpx.AsyncClient(timeout=3.0) as hclient:
-                    btc_resp = await hclient.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT")
-                if btc_resp.status_code == 200:
-                    market.btc_price = float(btc_resp.json()["price"])
-            except Exception:
-                pass  # Keep last known BTC price
 
             # Fetch 24h volume from Gamma once every 5 minutes
             if time.time() - market_volume_updated > 300:
@@ -3365,9 +3354,12 @@ async def websocket_endpoint(websocket: WebSocket):
                 active_strategy_a = active_strategy_b = active_strategy_c = active_strategy_c_trailing = active_strategy_d = active_strategy_e = active_strategy_f = active_strategy_7 = active_strategy_cpt = active_strategy_claude = False
                 
     except WebSocketDisconnect:
-        clients.remove(websocket)
+        if websocket in clients:
+            clients.remove(websocket)
     except Exception as e:
         print("WS Error:", e)
+        if websocket in clients:
+            clients.remove(websocket)
 
 # Serve frontend static files
 _frontend_dist = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'frontend', 'dist')
