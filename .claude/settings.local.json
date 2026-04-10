@@ -2,7 +2,23 @@
   "permissions": {
     "allow": [
       "Bash(xargs wc:*)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(powershell -Command \"Get-Process git -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep 1; Remove-Item ''C:\\\\Users\\\\shanu\\\\OneDrive\\\\Desktop\\\\Polymarket - Copy\\\\.git\\\\index.lock'' -Force -ErrorAction SilentlyContinue; Start-Sleep 1; Set-Location ''C:\\\\Users\\\\shanu\\\\OneDrive\\\\Desktop\\\\Polymarket - Copy''; & git add backend/main.py backend/strategies.py; & git commit -m ''Fix: CLOB prices not loading at cycle start - accept partial orderbook data:*)",
+      "Bash(Remove-Item -Force \"C:\\\\Users\\\\shanu\\\\OneDrive\\\\Desktop\\\\Polymarket - Copy\\\\.git\\\\index.lock\" -ErrorAction SilentlyContinue)",
+      "Bash(Get-Process git:*)",
+      "Bash(Stop-Process -Force -ErrorAction SilentlyContinue)",
+      "Bash(taskkill /F /IM git.exe)",
+      "Bash(timeout /t)",
+      "Bash(rm -f \"C:/Users/shanu/OneDrive/Desktop/Polymarket - Copy/.git/index.lock\")",
+      "Bash(taskkill //F //IM git.exe)",
+      "WebFetch(domain:gamma-api.polymarket.com)",
+      "Bash(curl -s https://gamma-api.polymarket.com/events?slug=bitcoin-up-or-down-march-16-2026-5am)",
+      "Bash(curl -s https://gamma-api.polymarket.com/events?slug=bitcoin-up-or-down-march-16-2026-5pm)",
+      "Bash(curl -v --connect-timeout 30 --max-time 60 \"https://clob.polymarket.com/midpoint?token_id=test\")",
+      "WebFetch(domain:clob.polymarket.com)",
+      "Bash(wc -l backend/*.py)",
+      "Bash(ls -lh backend/*.py)",
+      "Bash(ssh:*)"
     ]
   }
 }
