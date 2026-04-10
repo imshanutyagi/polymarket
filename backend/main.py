@@ -2831,8 +2831,30 @@ async def auto_discover_market():
                     live_token_ids["down"] = pf["down_token"]
                     with open("tokens.json", "w") as f:
                         json.dump([pf["up_token"], pf["down_token"]], f)
-                    next_hour = (int(time.time()) // 3600 + 1) * 3600
-                    time_remaining = next_hour - int(time.time())
+                    # Calculate end time from the pre-fetched slug
+                    try:
+                        pf_parts = slug.replace("-et", "").split("-")
+                        pf_time = pf_parts[-1]
+                        pf_ampm = "pm" if "pm" in pf_time else "am"
+                        pf_h12 = int(pf_time.replace("am","").replace("pm",""))
+                        pf_h24 = pf_h12 % 12 + (12 if pf_ampm == "pm" else 0)
+                        end_h24 = pf_h24 + 1
+                        from datetime import timezone as tz_mod2, timedelta as td2
+                        try:
+                            from zoneinfo import ZoneInfo
+                            et_off = datetime.now(tz_mod2.utc).astimezone(ZoneInfo("America/New_York")).utcoffset()
+                        except Exception:
+                            et_off = td2(hours=-4)
+                        cur_et2 = datetime.now(tz_mod2.utc) + et_off
+                        today_et2 = cur_et2.replace(hour=0, minute=0, second=0, microsecond=0)
+                        end_et2 = today_et2.replace(hour=end_h24 % 24)
+                        if end_h24 >= 24:
+                            end_et2 = end_et2 + td2(days=1)
+                        end_utc2 = int(end_et2.timestamp()) - int(et_off.total_seconds())
+                        time_remaining = max(30, end_utc2 - int(time.time()))
+                    except Exception:
+                        next_hour = (int(time.time()) // 3600 + 1) * 3600
+                        time_remaining = next_hour - int(time.time())
                     up_clamped = max(1, min(99, pf["up_price"]))
                     dn_clamped = max(1, min(99, pf["dn_price"]))
                     market.is_live = True
@@ -2916,9 +2938,31 @@ async def auto_discover_market():
                                         with open("tokens.json", "w") as f:
                                             json.dump([live_token_ids["up"], live_token_ids["down"]], f)
 
-                                    # Calculate time remaining (until next hour boundary)
-                                    next_hour = (now_secs // 3600 + 1) * 3600
-                                    time_remaining = next_hour - now_secs
+                                    # Calculate time remaining until market closes (next ET hour boundary)
+                                    # Parse the hour from the slug to compute exact end time
+                                    try:
+                                        # Extract hour from slug: e.g. "5pm" from "bitcoin-up-or-down-april-10-2026-5pm-et"
+                                        slug_parts = slug.replace("-et", "").split("-")
+                                        slug_time = slug_parts[-1]  # e.g. "5pm"
+                                        slug_ampm = "pm" if "pm" in slug_time else "am"
+                                        slug_hour12 = int(slug_time.replace("am","").replace("pm",""))
+                                        slug_hour24 = slug_hour12 % 12 + (12 if slug_ampm == "pm" else 0)
+                                        # Market ends 1 hour after slug time, in ET
+                                        end_hour24 = slug_hour24 + 1
+                                        # Convert ET end time to UTC
+                                        et_offset_secs = int(et_offset.total_seconds())
+                                        # Build end timestamp: today's date + end_hour in ET → UTC
+                                        today_et = current_et.replace(hour=0, minute=0, second=0, microsecond=0)
+                                        from datetime import timezone as tz_mod
+                                        end_et = today_et.replace(hour=end_hour24 % 24)
+                                        if end_hour24 >= 24:
+                                            end_et = end_et + timedelta(days=1)
+                                        end_utc_ts = int(end_et.timestamp()) - et_offset_secs
+                                        time_remaining = max(30, end_utc_ts - now_secs)
+                                    except Exception:
+                                        # Fallback: next UTC hour boundary
+                                        next_hour = (now_secs // 3600 + 1) * 3600
+                                        time_remaining = next_hour - now_secs
 
                                     # Set market state for new cycle (reject stale/thin-book prices)
                                     up_clamped = max(1, min(99, up_price))
