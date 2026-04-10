@@ -2439,9 +2439,12 @@ POLY_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 _ws_connected = False
 _ws_last_token_ids = {"up": "", "down": ""}
 
+_ws_last_log_time = 0.0
+_ws_last_logged_prices = (0, 0)
+
 async def _ws_update_prices(up_raw: float, dn_raw: float, source: str):
     """Apply WebSocket price update to market state (same logic as REST polling)."""
-    global clob_last_update_time, market_spread_cents
+    global clob_last_update_time, market_spread_cents, _ws_last_log_time, _ws_last_logged_prices
     up_val = max(1, min(99, round(up_raw * 100)))
     dn_val = max(1, min(99, round(dn_raw * 100)))
     is_settled = (up_val <= 1 or dn_val <= 1 or up_val >= 99 or dn_val >= 99)
@@ -2454,7 +2457,13 @@ async def _ws_update_prices(up_raw: float, dn_raw: float, source: str):
         now = clob_last_update_time
         market.history.append((now, market.up_price))
         market.history = [h for h in market.history if now - h[0] <= 300]
-        print(f"[WS] UP={up_val}¢ DOWN={dn_val}¢ via {source}")
+        # Only log when price changes or every 10 seconds to avoid spam
+        price_changed = (up_val, dn_val) != _ws_last_logged_prices
+        time_to_log = (now - _ws_last_log_time) >= 10
+        if price_changed or time_to_log:
+            print(f"[WS] UP={up_val}¢ DOWN={dn_val}¢ via {source}")
+            _ws_last_log_time = now
+            _ws_last_logged_prices = (up_val, dn_val)
 
 async def stream_ws_prices():
     """Connect to Polymarket WebSocket for real-time orderbook data."""
