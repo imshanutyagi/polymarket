@@ -876,9 +876,9 @@ function App() {
                 </thead>
                 <tbody>
                   {(() => {
-                    const STAT_KEYS = ["strategy_claude","strategy_ncaio"];
+                    const STAT_KEYS = ["strategy_ncaio"];
                     const labels: Record<string,string> = {
-                      strategy_claude: "Claude AI", strategy_ncaio: "NCAIO"
+                      strategy_ncaio: "NCAIO"
                     };
                     return STAT_KEYS.map(key => {
                       const s = strategyStats[key] ?? {trades:0,wins:0,total_profit:0,best:0,worst:0};
@@ -1327,8 +1327,8 @@ function App() {
               )}
             </div>
 
-            {/* Claude Strategy: AI Confluence — pinned to top */}
-            <div
+            {/* Claude Strategy: AI Confluence — HIDDEN (using NCAIO only) */}
+            {false && (<div
               onClick={() => toggleStrategy('CLAUDE')}
               className={`p-4 rounded-xl border cursor-pointer transition-colors ${strategies.strategy_claude
                 ? 'bg-violet-900/40 border-violet-500 shadow-[0_0_15px_rgba(139,92,246,0.3)]'
@@ -1639,7 +1639,7 @@ function App() {
                   )}
                 </div>
               )}
-            </div>
+            </div>)}
 
             {/* === HIDDEN OLD STRATEGIES (kept in backend, hidden from UI) === */}
             {false && (<>
