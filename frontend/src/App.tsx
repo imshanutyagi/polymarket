@@ -209,17 +209,7 @@ function App() {
             const nowSeconds = Math.floor(Date.now() / 1000);
             let targetSlug = "";
 
-            if (market.cycle_duration === 300) {
-              // 5-minute markets snap to exact 300s UTC boundaries
-              let nextBoundary = Math.ceil(nowSeconds / 300) * 300;
-              if (nextBoundary - nowSeconds < 60) nextBoundary += 300;
-              targetSlug = `btc-updown-5m-${nextBoundary}`;
-            } else if (market.cycle_duration === 900) {
-              // 15-minute markets snap to exact 900s UTC boundaries
-              let nextBoundary = Math.ceil(nowSeconds / 900) * 900;
-              if (nextBoundary - nowSeconds < 60) nextBoundary += 900;
-              targetSlug = `btc-updown-15m-${nextBoundary}`;
-            } else if (market.cycle_duration === 3600) {
+            if (market.cycle_duration === 3600) {
               // Hourly markets use human-readable ET strings like 'bitcoin-up-or-down-march-8-6pm-et'
               const safeTime = new Date((nowSeconds + 300) * 1000);
               safeTime.setMinutes(0, 0, 0);
@@ -357,29 +347,11 @@ function App() {
 
                 const targetPrice = manualTargetRef.current || 0;
 
-                let timeRemainingSeconds = 0;
                 const syncedNow = Date.now() + serverTimeOffset;
-                const titleLower = (event.title || "").toLowerCase();
-                const slugLower = activeLiveSlug.toLowerCase();
-                
-                if (titleLower.includes("- hourly") || titleLower.includes("up or down") || slugLower.includes("hourly") || slugLower.includes("-et")) {
-                  const nowSecs = Math.floor(syncedNow / 1000);
-                  const nextHour = Math.ceil(nowSecs / 3600) * 3600;
-                  timeRemainingSeconds = nextHour - nowSecs;
-                } else if (slugLower.includes("15m") || titleLower.includes("15m")) {
-                  const nowSecs = Math.floor(syncedNow / 1000);
-                  const next15m = Math.ceil(nowSecs / 900) * 900;
-                  timeRemainingSeconds = next15m - nowSecs;
-                } else if (slugLower.includes("5m") || titleLower.includes("5m")) {
-                  const nowSecs = Math.floor(syncedNow / 1000);
-                  const next5m = Math.ceil(nowSecs / 300) * 300;
-                  timeRemainingSeconds = next5m - nowSecs;
-                } else {
-                  const endDateStr = m.endDate || event.endDate;
-                  if (endDateStr) {
-                    timeRemainingSeconds = Math.max(0, (new Date(endDateStr).getTime() - syncedNow) / 1000);
-                  }
-                }
+                // 1H markets only — snap to next hour boundary
+                const nowSecs = Math.floor(syncedNow / 1000);
+                const nextHour = Math.ceil(nowSecs / 3600) * 3600;
+                const timeRemainingSeconds = nextHour - nowSecs;
 
                 // Reject stale/settlement prices (≤5¢ or ≥95¢) — same guard as backend
                 const isStale = upPrice <= 5 || downPrice <= 5 || upPrice >= 95 || downPrice >= 95;
@@ -618,8 +590,6 @@ function App() {
           </h1>
           <div className="flex items-center space-x-1 bg-gray-900 border border-gray-700/50 p-1 rounded-xl shadow-inner">
             {[
-              { label: '5M', value: 300 },
-              { label: '15M', value: 900 },
               { label: '1H', value: 3600 }
             ].map(tf => (
               <button
