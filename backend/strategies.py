@@ -802,10 +802,10 @@ class NewClaudeAllInOneStrategy:
     EMA_FAST_ALPHA = 2.0 / 16.0   # 15-tick EMA
     EMA_SLOW_ALPHA = 2.0 / 46.0   # 45-tick EMA
     RSI_PERIOD = 14
-    ANTI_WHIPSAW_SECONDS = 20.0
+    ANTI_WHIPSAW_SECONDS = 15.0
     FLIP_COOLDOWN_SECONDS = 60.0
     TIMEOUT_MINUTES = 8
-    OBSERVE_SECONDS = 120
+    OBSERVE_SECONDS = 60
     HISTORY_WINDOW = 1200
     MAX_DRAWDOWN = -6.0
     CONSECUTIVE_LOSS_CAUTIOUS = 2
@@ -934,9 +934,11 @@ class NewClaudeAllInOneStrategy:
         reasons = []
 
         # Signal 1: BTC price vs target (weight: 40)
+        # As expiry approaches, BTC position becomes MORE deterministic — signal should be STRONGEST late cycle
         if btc_price > 0 and price_to_beat > 0:
             delta = btc_price - price_to_beat
-            time_factor = min(1.0, time_remaining / 3600.0) * 1.5
+            time_elapsed_ratio = 1.0 - min(1.0, time_remaining / 3600.0)  # 0 at start → 1 at end
+            time_factor = 0.8 + (time_elapsed_ratio * 1.2)  # 0.8 at start → 2.0 at expiry
             btc_signal = max(-40.0, min(40.0, (delta / 10.0) * time_factor))
             if abs(btc_signal) > 5:
                 reasons.append(f"BTC ${abs(delta):.0f} {'above' if delta > 0 else 'below'}")
@@ -1088,7 +1090,14 @@ class NewClaudeAllInOneStrategy:
                            "price": current_price, "trade_pnl": unrealized})
             return actions
 
-        # 3. STOP-LOSS + optional position flip (with 3-min grace period)
+        # 3a. HARD CAP during grace period — emergency exit at -$2.50 even in first 3 min
+        if hold_seconds <= self.STOPLOSS_GRACE_SECONDS and unrealized <= -2.50:
+            self._close_trade(trade, current_price, unrealized, f"grace-cap ${unrealized:.2f}")
+            actions.append({"action": "market_sell", "side": side, "shares": shares,
+                           "price": current_price, "trade_pnl": unrealized})
+            return actions
+
+        # 3b. STOP-LOSS + optional position flip (after 3-min grace period)
         if hold_seconds > self.STOPLOSS_GRACE_SECONDS and unrealized <= -self.config.stop_loss_per_trade:
             self._close_trade(trade, current_price, unrealized, f"stop-loss ${unrealized:.2f}")
             actions.append({"action": "market_sell", "side": side, "shares": shares,
@@ -1252,13 +1261,13 @@ class NewClaudeAllInOneStrategy:
         if (100 - effective_cost) < (min_target_cents + spread):
             return actions
 
-        # Pullback detection
+        # Pullback detection — only block on extreme spikes (>0.6c/s), not healthy trends
         vel_30s = self._compute_velocity(30)
         vel_10s = self._compute_velocity(10)
-        if abs(vel_30s) > 0.3:
-            if side == "up" and vel_30s > 0.3 and vel_10s > 0:
+        if abs(vel_30s) > 0.6:
+            if side == "up" and vel_30s > 0.6 and vel_10s > 0:
                 return actions
-            if side == "down" and vel_30s < -0.3 and vel_10s < 0:
+            if side == "down" and vel_30s < -0.6 and vel_10s < 0:
                 return actions
 
         # Sizing
