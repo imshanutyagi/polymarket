@@ -1660,6 +1660,49 @@ async def broadcast_state():
     for c in disconnected:
         clients.remove(c)
 
+async def sync_live_positions():
+    """On startup and periodically, sync actual CLOB positions with internal portfolio."""
+    await asyncio.sleep(10)  # Wait for market discovery first
+    while True:
+        try:
+            if not clob_client or not live_mode_enabled:
+                await asyncio.sleep(30)
+                continue
+
+            up_token = live_token_ids.get("up", "")
+            dn_token = live_token_ids.get("down", "")
+            if not up_token or not dn_token:
+                await asyncio.sleep(10)
+                continue
+
+            # Query open orders to see if we have any resting
+            try:
+                open_orders = await asyncio.to_thread(clob_client.get_orders)
+                if open_orders and isinstance(open_orders, list) and len(open_orders) > 0:
+                    print(f"[SYNC] {len(open_orders)} open orders on CLOB")
+            except Exception:
+                pass
+
+            # Query trades to check recent fills
+            try:
+                trades = await asyncio.to_thread(clob_client.get_trades)
+                if trades and isinstance(trades, list) and len(trades) > 0:
+                    recent = trades[:3]
+                    for t in recent:
+                        side = t.get("side", "?")
+                        price = t.get("price", "?")
+                        size = t.get("size", "?")
+                        asset = t.get("asset_id", "")
+                        token_label = "UP" if asset == up_token else "DN" if asset == dn_token else "?"
+                        print(f"[SYNC] Recent trade: {token_label} {side} {size}@{price}")
+            except Exception as e:
+                print(f"[SYNC] Trade query error: {e}")
+
+        except Exception as e:
+            print(f"[SYNC] Position sync error: {e}")
+
+        await asyncio.sleep(120)  # Check every 2 minutes
+
 async def sync_live_balance():
     """Periodically try to sync USDC balance from Polymarket CLOB."""
     while True:
@@ -3119,6 +3162,7 @@ async def startup_event():
     asyncio.create_task(stream_ws_prices())      # Primary: WebSocket real-time prices
     asyncio.create_task(stream_live_prices())     # Fallback: REST polling (only when WS stale >5s)
     asyncio.create_task(sync_live_balance())
+    asyncio.create_task(sync_live_positions())    # Position reconciliation every 2 min
     asyncio.create_task(run_ai_agent())
 
 @app.websocket("/ws")

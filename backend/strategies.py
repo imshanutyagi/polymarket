@@ -1112,7 +1112,7 @@ class NewClaudeAllInOneStrategy:
                 flip_ok = (side == "up" and vel_2m < -0.15) or (side == "down" and vel_2m > 0.15)
                 if flip_ok:
                     flip_price = down_price if opposite == "down" else up_price
-                    if flip_price <= self.config.get_max_entry_price():
+                    if flip_price > 0 and flip_price <= self.config.get_max_entry_price():
                         dollars = min(self.config.get_trade_dollars(), 5.0)
                         flip_shares = dollars / (flip_price / 100.0)
                         self._open_trade(opposite, flip_shares, flip_price, now, time_remaining)
@@ -1236,7 +1236,7 @@ class NewClaudeAllInOneStrategy:
             return actions
 
         entry_price = up_price if side == "up" else down_price
-        if entry_price > self.config.get_max_entry_price():
+        if entry_price <= 0 or entry_price > self.config.get_max_entry_price():
             return actions
 
         # Choppy market filter — skip noisy oscillations
