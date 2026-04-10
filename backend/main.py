@@ -1561,6 +1561,7 @@ async def broadcast_state():
                 "warmup_seconds_left": max(0, round(cycle_warmup_until - time.time())),
                 "prices_fresh": clob_last_update_time > 0 and (time.time() - clob_last_update_time) <= 30,
                 "clob_price_age": round(time.time() - clob_last_update_time) if clob_last_update_time > 0 else -1,
+                "ws_connected": _ws_connected,
             },
             "portfolio": {
                 "balance": portfolio.balance,
@@ -2412,19 +2413,221 @@ async def market_loop():
             await asyncio.sleep(1)
 
 async def stream_live_prices():
-    """Poll CLOB midpoint every second — same source Polymarket UI uses, never shows settlement prices."""
+    """Poll CLOB midpoint every second — fallback when WebSocket is not connected."""
     while True:
         try:
             if not market.is_live:
                 await asyncio.sleep(2)
                 continue
 
-            await _poll_live_prices()
+            # Only poll REST if WebSocket hasn't updated in the last 5 seconds
+            ws_age = time.time() - clob_last_update_time if clob_last_update_time > 0 else float('inf')
+            if ws_age > 5:
+                await _poll_live_prices()
             await asyncio.sleep(1)
 
         except Exception as e:
             print(f"[PRICE] Poll error: {e}")
             await asyncio.sleep(2)
+
+
+# ═══ POLYMARKET WEBSOCKET — REAL-TIME ORDERBOOK STREAMING ═══════════════════
+# Connects to wss://ws-subscriptions-clob.polymarket.com/ws/market for instant
+# price updates instead of polling REST every 1s. Fixes stale 50/50 prices at cycle start.
+
+POLY_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+_ws_connected = False
+_ws_last_token_ids = {"up": "", "down": ""}
+
+async def _ws_update_prices(up_raw: float, dn_raw: float, source: str):
+    """Apply WebSocket price update to market state (same logic as REST polling)."""
+    global clob_last_update_time, market_spread_cents
+    up_val = max(1, min(99, round(up_raw * 100)))
+    dn_val = max(1, min(99, round(dn_raw * 100)))
+    is_settled = (up_val <= 1 or dn_val <= 1 or up_val >= 99 or dn_val >= 99)
+    if not is_settled:
+        market.up_price = up_val
+        market.down_price = dn_val
+        market.prices_loaded = True
+        market.current_price = market.up_price
+        clob_last_update_time = time.time()
+        now = clob_last_update_time
+        market.history.append((now, market.up_price))
+        market.history = [h for h in market.history if now - h[0] <= 300]
+        print(f"[WS] UP={up_val}¢ DOWN={dn_val}¢ via {source}")
+
+async def stream_ws_prices():
+    """Connect to Polymarket WebSocket for real-time orderbook data."""
+    global _ws_connected, _ws_last_token_ids, market_ask_liquidity, market_bid_liquidity, market_spread_cents
+
+    # Internal book state — maintained from WebSocket events
+    _book = {"up_asks": [], "up_bids": [], "dn_asks": [], "dn_bids": []}
+    _best = {"up_ask": None, "up_bid": None, "dn_ask": None, "dn_bid": None}
+
+    while True:
+        try:
+            # Wait for live market with token IDs
+            if not market.is_live or not live_token_ids.get("up") or not live_token_ids.get("down"):
+                _ws_connected = False
+                await asyncio.sleep(2)
+                continue
+
+            up_token = live_token_ids["up"]
+            dn_token = live_token_ids["down"]
+
+            # Reset book state on new market
+            if up_token != _ws_last_token_ids["up"] or dn_token != _ws_last_token_ids["down"]:
+                _book = {"up_asks": [], "up_bids": [], "dn_asks": [], "dn_bids": []}
+                _best = {"up_ask": None, "up_bid": None, "dn_ask": None, "dn_bid": None}
+                _ws_last_token_ids = {"up": up_token, "down": dn_token}
+
+            print(f"[WS] Connecting to Polymarket WebSocket...")
+            async with websockets.connect(POLY_WS_URL, ping_interval=None, close_timeout=5) as ws:
+                # Subscribe to both tokens
+                sub_msg = json.dumps({
+                    "assets_ids": [up_token, dn_token],
+                    "type": "market",
+                    "custom_feature_enabled": True
+                })
+                await ws.send(sub_msg)
+                _ws_connected = True
+                print(f"[WS] Connected! Subscribed to UP={up_token[:20]}... DN={dn_token[:20]}...")
+
+                # Heartbeat task — send PING every 10s
+                async def heartbeat():
+                    while True:
+                        try:
+                            await asyncio.sleep(10)
+                            await ws.send("PING")
+                        except Exception:
+                            break
+
+                hb_task = asyncio.create_task(heartbeat())
+
+                try:
+                    async for message in ws:
+                        # Check if market changed — need to reconnect
+                        if live_token_ids["up"] != up_token or live_token_ids["down"] != dn_token:
+                            print(f"[WS] Market changed — reconnecting...")
+                            break
+
+                        if message == "PONG":
+                            continue
+
+                        try:
+                            data = json.loads(message)
+                        except json.JSONDecodeError:
+                            continue
+
+                        event = data.get("event_type", "")
+                        asset_id = data.get("asset_id", "")
+
+                        if event == "book":
+                            # Full orderbook snapshot
+                            asks = data.get("asks", [])
+                            bids = data.get("bids", [])
+                            if asset_id == up_token:
+                                _book["up_asks"] = asks
+                                _book["up_bids"] = bids
+                            elif asset_id == dn_token:
+                                _book["dn_asks"] = asks
+                                _book["dn_bids"] = bids
+
+                            # Compute cross-book prices from full book
+                            up_asks = _book["up_asks"]
+                            up_bids = _book["up_bids"]
+                            dn_asks = _book["dn_asks"]
+                            dn_bids = _book["dn_bids"]
+
+                            up_direct = min((float(a["price"]) for a in up_asks), default=None)
+                            dn_direct = min((float(a["price"]) for a in dn_asks), default=None)
+                            up_cross = (1.0 - max((float(b["price"]) for b in dn_bids), default=0)) if dn_bids else None
+                            dn_cross = (1.0 - max((float(b["price"]) for b in up_bids), default=0)) if up_bids else None
+
+                            up_cands = [p for p in [up_direct, up_cross] if p is not None and 0.01 < p < 0.99]
+                            dn_cands = [p for p in [dn_direct, dn_cross] if p is not None and 0.01 < p < 0.99]
+                            up_price = min(up_cands) if up_cands else None
+                            dn_price = min(dn_cands) if dn_cands else None
+
+                            if up_price is not None and dn_price is not None:
+                                await _ws_update_prices(up_price, dn_price, "ws-book")
+                                # Update liquidity
+                                try:
+                                    if up_asks:
+                                        ba = min(float(a["price"]) for a in up_asks)
+                                        market_ask_liquidity = round(sum(float(a["size"]) for a in up_asks if abs(float(a["price"]) - ba) < 0.01) * ba, 2)
+                                    if up_asks and up_bids:
+                                        bb = max(float(b["price"]) for b in up_bids)
+                                        market_bid_liquidity = round(sum(float(b["size"]) for b in up_bids if abs(float(b["price"]) - bb) < 0.01) * bb, 2)
+                                        market_spread_cents = round((ba - bb) * 100, 1)
+                                except Exception:
+                                    pass
+                            elif up_price is not None:
+                                await _ws_update_prices(up_price, max(0.01, 1.0 - up_price), "ws-book-partial")
+                            elif dn_price is not None:
+                                await _ws_update_prices(max(0.01, 1.0 - dn_price), dn_price, "ws-book-partial")
+
+                        elif event == "price_change":
+                            # Incremental price update — use best_bid/best_ask directly
+                            for pc in data.get("price_changes", []):
+                                pc_asset = pc.get("asset_id", "")
+                                best_bid = pc.get("best_bid")
+                                best_ask = pc.get("best_ask")
+                                if pc_asset == up_token:
+                                    if best_ask: _best["up_ask"] = float(best_ask)
+                                    if best_bid: _best["up_bid"] = float(best_bid)
+                                elif pc_asset == dn_token:
+                                    if best_ask: _best["dn_ask"] = float(best_ask)
+                                    if best_bid: _best["dn_bid"] = float(best_bid)
+
+                            # Cross-book from best prices
+                            up_direct = _best["up_ask"]
+                            dn_direct = _best["dn_ask"]
+                            up_cross = (1.0 - _best["dn_bid"]) if _best["dn_bid"] else None
+                            dn_cross = (1.0 - _best["up_bid"]) if _best["up_bid"] else None
+                            up_cands = [p for p in [up_direct, up_cross] if p is not None and 0.01 < p < 0.99]
+                            dn_cands = [p for p in [dn_direct, dn_cross] if p is not None and 0.01 < p < 0.99]
+                            if up_cands and dn_cands:
+                                await _ws_update_prices(min(up_cands), min(dn_cands), "ws-price-change")
+
+                        elif event == "last_trade_price":
+                            # A trade just happened — log it
+                            side = data.get("side", "?")
+                            price = data.get("price", "?")
+                            size = data.get("size", "?")
+                            token_label = "UP" if asset_id == up_token else "DN" if asset_id == dn_token else "?"
+                            print(f"[WS-TRADE] {token_label} {side} {size}@{price}")
+
+                        elif event == "best_bid_ask":
+                            # Direct best bid/ask update
+                            if asset_id == up_token:
+                                if data.get("best_ask"): _best["up_ask"] = float(data["best_ask"])
+                                if data.get("best_bid"): _best["up_bid"] = float(data["best_bid"])
+                            elif asset_id == dn_token:
+                                if data.get("best_ask"): _best["dn_ask"] = float(data["best_ask"])
+                                if data.get("best_bid"): _best["dn_bid"] = float(data["best_bid"])
+
+                            up_direct = _best["up_ask"]
+                            dn_direct = _best["dn_ask"]
+                            up_cross = (1.0 - _best["dn_bid"]) if _best["dn_bid"] else None
+                            dn_cross = (1.0 - _best["up_bid"]) if _best["up_bid"] else None
+                            up_cands = [p for p in [up_direct, up_cross] if p is not None and 0.01 < p < 0.99]
+                            dn_cands = [p for p in [dn_direct, dn_cross] if p is not None and 0.01 < p < 0.99]
+                            if up_cands and dn_cands:
+                                await _ws_update_prices(min(up_cands), min(dn_cands), "ws-bba")
+
+                finally:
+                    hb_task.cancel()
+                    _ws_connected = False
+
+        except websockets.exceptions.ConnectionClosed as e:
+            _ws_connected = False
+            print(f"[WS] Connection closed: {e}. Reconnecting in 3s...")
+            await asyncio.sleep(3)
+        except Exception as e:
+            _ws_connected = False
+            print(f"[WS] Error: {e}. Reconnecting in 5s...")
+            await asyncio.sleep(5)
 
 
 async def auto_discover_market():
@@ -2855,7 +3058,8 @@ async def _poll_live_prices():
 async def startup_event():
     asyncio.create_task(market_loop())
     asyncio.create_task(auto_discover_market())
-    asyncio.create_task(stream_live_prices())
+    asyncio.create_task(stream_ws_prices())      # Primary: WebSocket real-time prices
+    asyncio.create_task(stream_live_prices())     # Fallback: REST polling (only when WS stale >5s)
     asyncio.create_task(sync_live_balance())
     asyncio.create_task(run_ai_agent())
 
