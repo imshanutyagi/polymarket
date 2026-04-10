@@ -936,35 +936,51 @@ async def _try_order(order_args: "OrderArgs", order_type: "OrderType") -> tuple:
                 return False, err
     return False, "all combinations failed"
 
-async def execute_live_buy(direction: str, shares: float, price_cents: int):
-    """Execute a real market buy on Polymarket CLOB."""
+async def execute_live_buy(direction: str, shares: float, price_cents: int) -> bool:
+    """Execute a real market buy on Polymarket CLOB. Returns True on success."""
     if not clob_clients or not live_mode_enabled:
-        return
+        return False
     token_id = live_token_ids.get(direction, "")
     if not token_id:
-        print(f"[LIVE] ⚠️ No token ID for {direction} — order SKIPPED (simulation only)")
-        return
+        print(f"[LIVE] ⚠️ No token ID for {direction} — order SKIPPED")
+        return False
     # Aggressive price (+2¢) to cross the spread as taker
     price = round(min(0.97, (price_cents + 2) / 100.0), 2)
     size = round(shares, 2)
     order_args = OrderArgs(price=price, size=size, side=BUY, token_id=token_id)
     print(f"[LIVE] Placing BUY {size} {direction.upper()} @ {int(price*100)}¢")
-    await _try_order(order_args, OrderType.FOK)
+    success, resp = await _try_order(order_args, OrderType.FOK)
+    if not success:
+        print(f"[LIVE] ❌ BUY FAILED: {resp}")
+        for ws_client in clients:
+            try:
+                await ws_client.send_text(json.dumps({"type": "error", "message": f"Live BUY {direction.upper()} failed: {str(resp)[:100]}"}))
+            except Exception:
+                pass
+    return success
 
-async def execute_live_sell(direction: str, shares: float, price_cents: int):
-    """Execute a real market sell on Polymarket CLOB."""
+async def execute_live_sell(direction: str, shares: float, price_cents: int) -> bool:
+    """Execute a real market sell on Polymarket CLOB. Returns True on success."""
     if not clob_clients or not live_mode_enabled:
-        return
+        return False
     token_id = live_token_ids.get(direction, "")
     if not token_id:
-        print(f"[LIVE] ⚠️ No token ID for {direction} — sell SKIPPED (simulation only)")
-        return
+        print(f"[LIVE] ⚠️ No token ID for {direction} — sell SKIPPED")
+        return False
     # Aggressive price (-2¢) to cross the spread as taker
     price = round(max(0.02, (price_cents - 2) / 100.0), 2)
     size = round(shares, 2)
     order_args = OrderArgs(price=price, size=size, side=SELL, token_id=token_id)
     print(f"[LIVE] Placing SELL {size} {direction.upper()} @ {int(price*100)}¢")
-    await _try_order(order_args, OrderType.FOK)
+    success, resp = await _try_order(order_args, OrderType.FOK)
+    if not success:
+        print(f"[LIVE] ❌ SELL FAILED: {resp}")
+        for ws_client in clients:
+            try:
+                await ws_client.send_text(json.dumps({"type": "error", "message": f"Live SELL {direction.upper()} failed: {str(resp)[:100]}"}))
+            except Exception:
+                pass
+    return success
 
 clients: List[WebSocket] = []
 
@@ -2356,6 +2372,13 @@ async def market_loop():
                             continue  # skip this action
 
                     if act["action"] in ["market_sell", "limit_sell_fill"]:
+                        # In live mode: execute CLOB sell FIRST, only update portfolio on success
+                        if live_mode_enabled:
+                            sell_ok = await execute_live_sell(act["side"], act["shares"], act["price"])
+                            if not sell_ok:
+                                print(f"[NCAIO] Live SELL failed — skipping portfolio update to stay in sync")
+                                continue
+
                         revenue = act["shares"] * (act["price"] / 100.0)
                         portfolio.balance += revenue
                         avg_entry = 0.0
@@ -2386,20 +2409,27 @@ async def market_loop():
                         })
                         if len(portfolio.history) > 10:
                             portfolio.history = portfolio.history[-10:]
-                        if live_mode_enabled:
-                            asyncio.create_task(execute_live_sell(act["side"], act["shares"], act["price"]))
 
                     elif act["action"] == "limit_buy_fill":
                         cost = act["shares"] * (act["price"] / 100.0)
                         if portfolio.balance >= cost:
+                            # In live mode: execute CLOB buy FIRST, only update portfolio on success
+                            if live_mode_enabled:
+                                buy_ok = await execute_live_buy(act["side"], act["shares"], act["price"])
+                                if not buy_ok:
+                                    print(f"[NCAIO] Live BUY failed — reverting strategy state")
+                                    ncaio_strategy.held_positions[act["side"]] -= act["shares"]
+                                    active_trade = ncaio_strategy._get_active_trade()
+                                    if active_trade and active_trade["side"] == act["side"]:
+                                        active_trade["status"] = "closed"
+                                    continue
+
                             portfolio.balance -= cost
                             portfolio.positions[act["side"]] += act["shares"]
                             portfolio.total_spent += cost
                             portfolio.spent[act["side"]] += cost
                             position_entry_time = time.time()
                             position_entry_time_left_min = time_left / 60.0
-                            if live_mode_enabled:
-                                asyncio.create_task(execute_live_buy(act["side"], act["shares"], act["price"]))
                         else:
                             # Insufficient balance — revert internal tracking
                             ncaio_strategy.held_positions[act["side"]] -= act["shares"]
