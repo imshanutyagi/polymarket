@@ -2760,6 +2760,9 @@ async def auto_discover_market():
     global live_token_ids, clob_last_update_time
     expired_slugs = set()  # Track all expired slugs to never reconnect to them
     _prefetched_next = {}  # Pre-fetched next market data {slug, up_token, down_token, up_price, dn_price}
+    _stuck_since = 0.0     # Track when we started failing to find a market
+    STUCK_ALERT_SECONDS = 30    # Alert UI after 30s of no market
+    STUCK_RESTART_SECONDS = 180  # Full restart after 3 minutes
 
     while True:
         try:
@@ -2984,9 +2987,42 @@ async def auto_discover_market():
                     continue
 
             if not found_new:
-                print(f"[AUTO] No new market found, retrying in 5s...")
+                now = time.time()
+                if _stuck_since == 0.0:
+                    _stuck_since = now
+
+                stuck_duration = now - _stuck_since
+
+                # Alert UI after 30 seconds of being stuck
+                if stuck_duration >= STUCK_ALERT_SECONDS:
+                    alert_msg = f"Market discovery stuck for {int(stuck_duration)}s — searching for next market..."
+                    print(f"[AUTO] ⚠️ {alert_msg}")
+                    for ws_client in clients:
+                        try:
+                            await ws_client.send_text(json.dumps({"type": "error", "message": alert_msg}))
+                        except Exception:
+                            pass
+
+                # Full restart after 3 minutes — clear expired slugs and start fresh
+                if stuck_duration >= STUCK_RESTART_SECONDS:
+                    print(f"[AUTO] 🔄 Stuck for {int(stuck_duration)}s — clearing expired slugs and restarting discovery")
+                    expired_slugs.clear()
+                    _prefetched_next = {}
+                    _stuck_since = 0.0
+                    market.is_live = False
+                    market.live_slug = ""
+                    market.prices_loaded = False
+                    live_token_ids.clear()
+                    clob_last_update_time = 0.0
+                    for ws_client in clients:
+                        try:
+                            await ws_client.send_text(json.dumps({"type": "error", "message": "Discovery restarted — clearing stale state and reconnecting..."}))
+                        except Exception:
+                            pass
+
                 await asyncio.sleep(5)
             else:
+                _stuck_since = 0.0  # Reset stuck timer on success
                 await asyncio.sleep(15)
 
         except Exception as e:
