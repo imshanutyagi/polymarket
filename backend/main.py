@@ -2519,6 +2519,36 @@ async def stream_ws_prices():
                         except json.JSONDecodeError:
                             continue
 
+                        # First message is a LIST of book snapshots — process each one
+                        if isinstance(data, list):
+                            for item in data:
+                                if isinstance(item, dict) and item.get("bids") is not None:
+                                    item["event_type"] = "book"
+                                    # Re-inject as individual book events
+                                    asset_id = item.get("asset_id", "")
+                                    asks = item.get("asks", [])
+                                    bids = item.get("bids", [])
+                                    if asset_id == up_token:
+                                        _book["up_asks"] = asks
+                                        _book["up_bids"] = bids
+                                    elif asset_id == dn_token:
+                                        _book["dn_asks"] = asks
+                                        _book["dn_bids"] = bids
+                            # Compute prices after processing all book snapshots
+                            up_asks_l = _book["up_asks"]
+                            up_bids_l = _book["up_bids"]
+                            dn_asks_l = _book["dn_asks"]
+                            dn_bids_l = _book["dn_bids"]
+                            up_d = min((float(a["price"]) for a in up_asks_l), default=None)
+                            dn_d = min((float(a["price"]) for a in dn_asks_l), default=None)
+                            up_c = (1.0 - max((float(b["price"]) for b in dn_bids_l), default=0)) if dn_bids_l else None
+                            dn_c = (1.0 - max((float(b["price"]) for b in up_bids_l), default=0)) if up_bids_l else None
+                            up_cands2 = [p for p in [up_d, up_c] if p is not None and 0.01 < p < 0.99]
+                            dn_cands2 = [p for p in [dn_d, dn_c] if p is not None and 0.01 < p < 0.99]
+                            if up_cands2 and dn_cands2:
+                                await _ws_update_prices(min(up_cands2), min(dn_cands2), "ws-init-book")
+                            continue
+
                         event = data.get("event_type", "")
                         asset_id = data.get("asset_id", "")
 
