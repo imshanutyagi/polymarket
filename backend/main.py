@@ -2816,8 +2816,8 @@ async def auto_discover_market():
             old_slug = market.live_slug
             if market.is_live:
                 print(f"[AUTO] Cycle ended for {old_slug}, discovering new market...")
-                if old_slug:
-                    expired_slugs.add(old_slug)
+                # Don't add to expired_slugs here — let Gamma's closed flag decide
+                # The current hour slug should always be re-checkable
                 market.is_live = False
                 market.transitioning = True   # Blocks simulator from setting 1c/99c settlement prices
                 market.live_slug = ""
@@ -2897,14 +2897,14 @@ async def auto_discover_market():
             nxt_h12 = nxt_h24 % 12 or 12
             next_slug = f"bitcoin-up-or-down-{next_et.strftime('%B').lower()}-{next_et.day}-{next_et.year}-{nxt_h12}{nxt_ampm}-et"
 
+            # Always try current hour first (never skip it — it may have been wrongly expired)
+            # Only skip next hour if we know it's expired
             slugs_to_try = [current_slug]
-            if next_slug != current_slug:
+            if next_slug != current_slug and next_slug not in expired_slugs:
                 slugs_to_try.append(next_slug)
 
             found_new = False
             for slug in slugs_to_try:
-                if slug in expired_slugs:
-                    continue  # Skip any previously expired market slug
                 try:
                     async with httpx.AsyncClient() as client:
                         resp = await client.get(
