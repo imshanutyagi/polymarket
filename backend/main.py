@@ -2875,16 +2875,13 @@ async def auto_discover_market():
 
             now_secs = int(time.time())
             from datetime import timezone, timedelta
-            # Auto-detect EST vs EDT using zoneinfo (correct regardless of server location)
+
+            # Get current time in ET (timezone-aware) for correct .timestamp() conversion
             try:
                 from zoneinfo import ZoneInfo
-                et_offset = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York")).utcoffset()
+                current_et = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York"))
             except Exception:
-                et_offset = timedelta(hours=-4)  # fallback EDT
-
-            # Generate slug for the CURRENT hour (the active market)
-            current_time = datetime.now(timezone.utc)
-            current_et = current_time + et_offset
+                current_et = datetime.now(timezone.utc) + timedelta(hours=-4)  # naive fallback
             cur_h24 = current_et.hour
             cur_ampm = "pm" if cur_h24 >= 12 else "am"
             cur_h12 = cur_h24 % 12 or 12
