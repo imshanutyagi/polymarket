@@ -2869,6 +2869,10 @@ async def auto_discover_market():
                     market.cycle_duration = time_remaining
                     market.cycle_end_time = time.time() + time_remaining
                     market.history = []
+                    # Reset strategies for new cycle
+                    ncaio_strategy.reset_state(full_reset=True)
+                    claude_strategy.reset_state(full_reset=True)
+                    portfolio.cycle_profit = 0.0
                     print(f"[AUTO] INSTANT transition to {slug} (pre-fetched tokens ready)")
                     print(f"[AUTO] UP: {up_clamped}¢ | DOWN: {dn_clamped}¢ | Time: {time_remaining}s")
                     _prefetched_next = {}
@@ -2975,6 +2979,10 @@ async def auto_discover_market():
                                     market.cycle_duration = time_remaining
                                     market.cycle_end_time = time.time() + time_remaining
                                     market.history = []  # Clear old chart data
+                                    # Reset strategies for new cycle
+                                    ncaio_strategy.reset_state(full_reset=True)
+                                    claude_strategy.reset_state(full_reset=True)
+                                    portfolio.cycle_profit = 0.0
 
                                     print(f"[AUTO] Connected to NEW market: {slug}")
                                     print(f"[AUTO] UP: {up_price}¢ | DOWN: {down_price}¢ | Time: {time_remaining}s")
