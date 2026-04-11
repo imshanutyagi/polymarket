@@ -969,13 +969,40 @@ async def execute_live_sell(direction: str, shares: float, price_cents: int) -> 
     if not token_id:
         print(f"[LIVE] ⚠️ No token ID for {direction} — sell SKIPPED")
         return False
+
+    # Query actual shares held on CLOB (may differ from strategy's number due to taker fees)
+    actual_shares = shares
+    try:
+        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+        client = clob_clients.get(2) or clob_clients.get(0) or clob_clients.get(1)
+        if client:
+            data = await asyncio.to_thread(
+                client.get_balance_allowance,
+                BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, signature_type=2, token_id=token_id)
+            )
+            clob_shares = float(data.get("balance", "0")) / 1e6
+            if clob_shares > 0:
+                actual_shares = clob_shares
+                print(f"[LIVE] Actual CLOB shares for {direction.upper()}: {actual_shares:.2f} (strategy said {shares:.2f})")
+    except Exception as e:
+        print(f"[LIVE] Could not query actual shares: {e} — using strategy value")
+
     # Aggressive price (-2¢) to cross the spread as taker
     price = round(max(0.02, (price_cents - 2) / 100.0), 2)
-    # Round size DOWN to whole number to avoid precision issues with CLOB
-    size = max(1.0, float(int(shares)))
+    # Use actual shares, rounded down to avoid "not enough balance"
+    size = round(actual_shares * 0.99, 2)  # 1% buffer for dust/rounding
+    if size < 0.1:
+        print(f"[LIVE] ⚠️ Size too small ({size}) — sell SKIPPED")
+        return False
     order_args = OrderArgs(price=price, size=size, side=SELL, token_id=token_id)
     print(f"[LIVE] Placing SELL {size} {direction.upper()} @ {int(price*100)}¢")
     success, resp = await _try_order(order_args, OrderType.FOK)
+    if not success:
+        # Retry with even more aggressive price (-5¢) and GTC order type
+        print(f"[LIVE] FOK sell failed, retrying with aggressive GTC...")
+        price2 = round(max(0.01, (price_cents - 5) / 100.0), 2)
+        order_args2 = OrderArgs(price=price2, size=size, side=SELL, token_id=token_id)
+        success, resp = await _try_order(order_args2, OrderType.GTC)
     if not success:
         print(f"[LIVE] ❌ SELL FAILED: {resp}")
         for ws_client in clients:
