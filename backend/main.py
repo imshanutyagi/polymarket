@@ -57,8 +57,9 @@ try:
                 clob_clients[sig_type] = c
             except Exception:
                 pass
-        # Use type=0 (EOA) as default — works when private key IS the trading account
-        clob_client = clob_clients.get(0) or clob_clients.get(1) or clob_clients.get(2)
+        # Use type=2 (Proxy+funder) first — most Polymarket wallets use this
+        # Falls back to 0 (EOA) if 2 isn't available
+        clob_client = clob_clients.get(2) or clob_clients.get(1) or clob_clients.get(0)
         if clob_client:
             LIVE_TRADING_AVAILABLE = True
             print(f"[LIVE] CLOB credentials derived successfully! key={creds.api_key[:8]}...")
@@ -895,7 +896,7 @@ except:
 
 async def cancel_all_open_orders():
     """Cancel all open orders on the CLOB at cycle boundaries."""
-    client = clob_clients.get(0) or clob_clients.get(1) or clob_clients.get(2)
+    client = clob_clients.get(2) or clob_clients.get(0) or clob_clients.get(1)
     if not client or not live_mode_enabled:
         return
     try:
@@ -905,8 +906,8 @@ async def cancel_all_open_orders():
         print(f"[LIVE] Cancel all failed: {e}")
 
 async def _try_order(order_args: "OrderArgs", order_type: "OrderType") -> tuple:
-    """Place order. BTC Up/Down = neg_risk=True (NegRiskCTFExchange). EOA sig_type=0 first."""
-    for sig_type in [0, 1, 2]:  # EOA first — raw private key = sig_type=0
+    """Place order. Try sig_type=2 (Proxy) first since that's where funds are, then fallback."""
+    for sig_type in [2, 0, 1]:  # Proxy first — most Polymarket wallets use sig_type=2
         client = clob_clients.get(sig_type)
         if not client:
             continue
