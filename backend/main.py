@@ -924,7 +924,7 @@ async def _try_order(order_args: "OrderArgs", order_type: "OrderType") -> tuple:
                 return True, resp
             except Exception as e:
                 err = str(e)
-                print(f"[LIVE] sig_type={sig_type} neg_risk={neg_risk}: {err[:120]}")
+                print(f"[LIVE] sig_type={sig_type} neg_risk={neg_risk}: {err[:250]}")
                 if any(x in err for x in ["invalid signature", "Unauthorized", "not supported", "invalid amounts"]):
                     continue
                 if "not enough balance" in err or "allowance" in err.lower():
@@ -946,7 +946,8 @@ async def execute_live_buy(direction: str, shares: float, price_cents: int) -> b
         return False
     # Aggressive price (+2¢) to cross the spread as taker
     price = round(min(0.97, (price_cents + 2) / 100.0), 2)
-    size = round(shares, 2)
+    # Round size DOWN to whole number to avoid precision issues with CLOB
+    size = max(1.0, float(int(shares)))
     order_args = OrderArgs(price=price, size=size, side=BUY, token_id=token_id)
     print(f"[LIVE] Placing BUY {size} {direction.upper()} @ {int(price*100)}¢")
     success, resp = await _try_order(order_args, OrderType.FOK)
@@ -969,7 +970,8 @@ async def execute_live_sell(direction: str, shares: float, price_cents: int) -> 
         return False
     # Aggressive price (-2¢) to cross the spread as taker
     price = round(max(0.02, (price_cents - 2) / 100.0), 2)
-    size = round(shares, 2)
+    # Round size DOWN to whole number to avoid precision issues with CLOB
+    size = max(1.0, float(int(shares)))
     order_args = OrderArgs(price=price, size=size, side=SELL, token_id=token_id)
     print(f"[LIVE] Placing SELL {size} {direction.upper()} @ {int(price*100)}¢")
     success, resp = await _try_order(order_args, OrderType.FOK)
